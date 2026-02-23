@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Arafiles</title>
+  <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="stylesheet" href="Style.css" />
+  <link rel="manifest" href="Manifest.json" />
+  <meta name="theme-color" content="#0F172A" />
+  <script src="vazir-normal.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.js"></script>
+</head>
+<body class="dark">
+  <!-- Header -->
+  <header class="app-header glass-3d">
+    <h1 class="logo">Arafiles</h1>
+    <div class="header-actions">
+      <button id="backBtn" class="icon-btn" title="بازگشت"><span class="material-icons-outlined">arrow_back</span></button>
+      <button id="settingsBtn" class="icon-btn" title="تنظیمات"><span class="material-icons-outlined">settings</span></button>
+      <!-- دکمه Save -->
+    <button class="icon-btn" id="btnSave" title="خروجی JSON">
+      <span class="material-icons-outlined">save</span>
+    </button>
+    <!-- ورودی Import مخفی -->
+    <input type="file" id="importFile" accept="application/json" style="display:none" />
+    </div>
+  </header>
+
+  <!-- Main -->
+  <main id="app" class="container"></main>
+
+  <!-- Floating add folder -->
+  <button id="floatingAdd" class="floating-btn" title="افزودن پوشه">
+    <span class="material-icons-outlined">add</span>
+  </button>
+
+  <!-- Settings Modal -->
+  <div id="settingsOverlay" class="modal-overlay">
+    <div class="modal-panel glass-3d">
+      <div class="modal-header">
+        <h2>تنظیمات</h2>
+        <button class="icon-btn" onclick="closeSettings()"><span class="material-icons-outlined">close</span></button>
+      </div>
+      <div class="modal-body">
+        <div class="row">
+          <label>حالت نمایش</label>
+          <div class="row-inline">
+            <button class="icon-btn" onclick="setTheme('dark')" title="شب"><span class="material-icons-outlined">dark_mode</span></button>
+            <button class="icon-btn" onclick="setTheme('light')" title="روز"><span class="material-icons-outlined">light_mode</span></button>
+          </div>
+        </div>
+        <div class="row">
+          <label>پس‌زمینه</label>
+          <div class="preview-row">
+            <div class="preview-tile" data-bg="gradient1" style="background: linear-gradient(120deg,#1f2937,#3b82f6);" onclick="setBackgroundTile(this)"></div>
+            <div class="preview-tile" data-bg="gradient2" style="background: linear-gradient(120deg,#0ea5e9,#10b981);" onclick="setBackgroundTile(this)"></div>
+            <div class="preview-tile" data-bg="glass" style="background: rgba(255,255,255,0.5); backdrop-filter: blur(8px);" onclick="setBackgroundTile(this)"></div>
+            <div class="preview-tile" data-bg="grid" style="background-image: radial-gradient(#64748b 1px, transparent 1px); background-size: 24px 24px;" onclick="setBackgroundTile(this)"></div>
+            <div class="preview-tile" data-bg="plain" style="background:#E9EEF5;" onclick="setBackgroundTile(this)"></div>
+          </div>
+        </div>
+        <div class="row">
+          <label>پس‌زمینه دلخواه</label>
+          <input type="file" id="bgUpload" accept="image/*" />
+        </div>
+        <hr/>
+         <!-- دکمه بارگذاری JSON -->
+  <button class="primary" onclick="document.getElementById('importFile').click()">
+    <span class="material-icons-outlined">upload</span> بارگذاری داده‌ها
+  </button>
+
+  <!-- ورودی فایل مخفی -->
+  <input type="file" id="importFile" accept="application/json" style="display:none" />
+
+
+        <div class="row">
+          <label>ارتباط با ما</label>
+          <button class="icon-btn" onclick="sendEmail()" title="ارسال ایمیل"><span class="material-icons-outlined">email</span></button>
+        </div>
+        <hr/>
+        <div class="row">
+          <label>ریست کامل اپلیکیشن</label>
+          <button class="danger" onclick="openResetConfirm()"><span class="material-icons-outlined">delete_forever</span></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reset confirm -->
+  <div id="resetOverlay" class="modal-overlay">
+    <div class="modal-panel glass-3d">
+      <div class="modal-header">
+        <h2>تأیید ریست</h2>
+        <button class="icon-btn" onclick="closeReset()"><span class="material-icons-outlined">close</span></button>
+      </div>
+      <div class="modal-body">
+        <div id="resetStep1">
+          <p>مطمئنی می‌خوای پاک بشه؟</p>
+          <div class="row-inline">
+            <button class="secondary" onclick="closeReset()">نه پشیمونم</button>
+            <button class="danger" onclick="toResetStep2()">بله مطمئنم</button>
+          </div>
+        </div>
+        <div id="resetStep2" class="hidden">
+          <p>واقعاً مطمئنی می‌خوای این کارو بکنی؟</p>
+          <div class="row-inline">
+            <button class="secondary" onclick="closeReset()">به جون مادرم دستم خورده</button>
+            <button class="danger" onclick="doFullReset()">آره بخدا</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="App.js"></script>
+  <script>
+
+    function importData(file){
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const newState = JSON.parse(e.target.result);
+      state = newState;
+      save();
+      renderHome(); // یا openFolder(...) اگر داخل فولدر هستی
+      alert("داده‌ها با موفقیت بارگذاری شدند!");
+    } catch(err){
+      alert("خطا در خواندن فایل JSON");
+    }
+  };
+  reader.readAsText(file, "utf-8");
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  const btnPdf = document.getElementById("btnPdf");
+  if(btnPdf) btnPdf.onclick = () => exportPDF(10); 
+  // 🔑 عدد 10 یعنی در هر صفحه 10 سوال
+});
+
+window.addEventListener("DOMContentLoaded", () => {
+  const importInput = document.getElementById("importFile");
+  if(importInput) importInput.onchange = e => {
+    const file = e.target.files[0];
+    if(file) importData(file);
+  };
+});
+    function exportData(){
+  save(); // ذخیره آخرین state
+  const dataStr = JSON.stringify(state, null, 2);
+  const blob = new Blob([dataStr], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "arafiles-data.json";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function importData(file){
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const newState = JSON.parse(e.target.result);
+      state = newState;
+      save();
+      renderHome(); // یا openFolder(...) اگر داخل فولدر هستی
+      alert("داده‌ها با موفقیت بارگذاری شدند!");
+    } catch(err){
+      alert("خطا در خواندن فایل JSON");
+    }
+  };
+  reader.readAsText(file, "utf-8");
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  const btnSave = document.getElementById("btnSave");
+  const importInput = document.getElementById("importFile");
+
+  if(btnSave) btnSave.onclick = exportData;
+  if(importInput) importInput.onchange = e => {
+    const file = e.target.files[0];
+    if(file) importData(file);
+  };
+});
+
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('ُSw.js');
+    document.getElementById("settingsBtn").onclick = () => {
+      document.getElementById("settingsOverlay").classList.add("active");
+    };
+    document.getElementById("bgUpload").onchange = e => {
+      const file = e.target.files[0]; if(!file) return;
+      const url = URL.createObjectURL(file);
+      document.body.style.backgroundImage = `url(${url})`;
+      document.body.style.backgroundSize = "cover";
+      document.body.style.backgroundPosition = "center";
+    };
+
+
+
+
+
+
+
+
+  </script>
+</body>
+</html>
