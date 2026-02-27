@@ -1054,10 +1054,13 @@ async function exportPDF(folderIndex){
 
   if (document.fonts && document.fonts.ready) await document.fonts.ready;
 
+  // A4 px
   const PAGE_W = 794;
   const PAGE_H = 1123;
   const PADDING = 20;
+  const GAP = 18;
 
+  // Stage
   const stage = document.createElement("div");
   stage.style.position = "fixed";
   stage.style.left = "-99999px";
@@ -1073,6 +1076,7 @@ async function exportPDF(folderIndex){
   stage.style.overflow = "hidden";
   document.body.appendChild(stage);
 
+  // Title
   const title = document.createElement("div");
   title.style.fontWeight = "800";
   title.style.fontSize = "18px";
@@ -1081,27 +1085,50 @@ async function exportPDF(folderIndex){
   title.textContent = folder.name || "Arafiles";
   stage.appendChild(title);
 
-  const content = document.createElement("div");
-  content.style.height = (PAGE_H - (PADDING*2) - title.getBoundingClientRect().height - 12) + "px";
-  content.style.overflow = "hidden";
-  content.style.columnCount = "2";
-  content.style.columnGap = "18px";
-  content.style.columnFill = "auto";
-  stage.appendChild(content);
+  // Two columns container
+  const colsWrap = document.createElement("div");
+  colsWrap.style.display = "flex";
+  colsWrap.style.gap = GAP + "px";
+
+  const availableH = PAGE_H - (PADDING * 2) - title.getBoundingClientRect().height - 12;
+  colsWrap.style.height = availableH + "px";
+  colsWrap.style.overflow = "hidden";
+
+  const col1 = document.createElement("div");
+  const col2 = document.createElement("div");
+
+  [col1, col2].forEach(col => {
+    col.style.flex = "1";
+    col.style.height = "100%";
+    col.style.overflow = "hidden";
+    col.style.display = "flex";
+    col.style.flexDirection = "column";
+    col.style.gap = "12px";
+  });
+
+  colsWrap.appendChild(col1);
+  colsWrap.appendChild(col2);
+  stage.appendChild(colsWrap);
 
   const doc = new jsPDF("p","mm","a4");
-  const pageImages = [];
+  const pages = [];
 
-  const makeBlock = async (q, number) => {
+  const waitImages = async (root) => {
+    const imgs = Array.from(root.querySelectorAll("img"));
+    await Promise.all(imgs.map(img => {
+      if (img.complete) return Promise.resolve();
+      return new Promise(res => { img.onload = img.onerror = () => res(); });
+    }));
+    // یک فریم برای settle شدن layout
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  };
+
+  // block builder (همون ظاهر آزمونی)
+  const makeBlock = (q, number) => {
     const block = document.createElement("div");
-    block.style.display = "inline-block";
-    block.style.width = "100%";
     block.style.border = "1px solid #ccc";
     block.style.borderRadius = "10px";
     block.style.padding = "10px";
-    block.style.marginBottom = "12px";
-    block.style.breakInside = "avoid";
-    block.style.pageBreakInside = "avoid";
     block.style.boxSizing = "border-box";
 
     if (q.align === "center") block.style.textAlign = "center";
@@ -1125,25 +1152,15 @@ async function exportPDF(folderIndex){
         const label = String.fromCharCode(65 + i) + ". ";
         row.innerHTML =
           `<span style="direction:ltr;unicode-bidi:isolate;display:inline-block;min-width:22px;">${label}</span>` +
-          `<span>${escapeHtml(opt)}</span>`;
+          `<span>${opt}</span>`;
         opts.appendChild(row);
       });
       block.appendChild(opts);
     }
 
-    if(q.imageId){
-      const blob = await getImageBlob(q.imageId);
-      if(blob){
-        const dataUrl = await blobToDataURL(blob);
-        const img = document.createElement("img");
-        img.src = dataUrl;
-        img.style.maxWidth = "100%";
-        img.style.maxHeight = "220px";
-        img.style.objectFit = "contain";
-        img.style.marginTop = "10px";
-        img.style.borderRadius = "10px";
-        block.appendChild(img);
-      }
+    if(q.imageId && typeof getImageBlob === "function"){
+      // اگر نسخه IDB داری
+      // اینجا فقط placeholder می‌ذاریم و بعداً با async پرش می‌کنیم
     } else if(q.image){
       const img = document.createElement("img");
       img.src = q.image;
@@ -1158,6 +1175,24 @@ async function exportPDF(folderIndex){
     return block;
   };
 
+  // اگر از نسخه‌ی IDB استفاده می‌کنی: imageId → dataURL داخل PDF
+  const attachImageIfNeeded = async (q, block) => {
+    if(q.imageId && typeof getImageBlob === "function" && typeof blobToDataURL === "function"){
+      const blob = await getImageBlob(q.imageId);
+      if(blob){
+        const dataUrl = await blobToDataURL(blob);
+        const img = document.createElement("img");
+        img.src = dataUrl;
+        img.style.maxWidth = "100%";
+        img.style.maxHeight = "220px";
+        img.style.objectFit = "contain";
+        img.style.marginTop = "10px";
+        img.style.borderRadius = "10px";
+        block.appendChild(img);
+      }
+    }
+  };
+
   const snapPage = async () => {
     await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
     const canvas = await html2canvas(stage, {
@@ -1166,38 +1201,82 @@ async function exportPDF(folderIndex){
       useCORS: true,
       allowTaint: false
     });
-    // PNG برای کیفیت بالا
-    pageImages.push(canvas.toDataURL("image/png"));
+    pages.push(canvas.toDataURL("image/png"));
   };
 
-  const overflows = () => content.scrollHeight > content.clientHeight;
+  const clearCols = () => { col1.innerHTML = ""; col2.innerHTML = ""; };
 
-  content.innerHTML = "";
-  for(let i=0; i < (folder.questions||[]).length; i++){
+  const fits = (col) => col.scrollHeight <= col.clientHeight;
+
+  // Fill algorithm: col1 then col2 then new page
+  clearCols();
+  let currentCol = col1;
+
+  for(let i=0; i < (folder.questions || []).length; i++){
     const q = folder.questions[i];
-    const block = await makeBlock(q, i+1);
-    content.appendChild(block);
+    const block = makeBlock(q, i+1);
+    await attachImageIfNeeded(q, block);
 
-    if(overflows()){
-      content.removeChild(block);
-      await snapPage();
+    currentCol.appendChild(block);
+    await waitImages(block);
 
-      content.innerHTML = "";
-      content.appendChild(block);
+    if(!fits(currentCol)){
+      // doesn't fit in current column
+      currentCol.removeChild(block);
 
-      // اگر سؤال خیلی بزرگ باشد: بدون دست‌زدن به کیفیت تصویر، فقط کمی چیدمان را جمع می‌کنیم
-      if(overflows()){
-        block.style.fontSize = "12px";
-        block.style.lineHeight = "1.2";
+      // try other column if we were in col1
+      if(currentCol === col1){
+        currentCol = col2;
+        currentCol.appendChild(block);
+        await waitImages(block);
+
+        if(!fits(currentCol)){
+          // doesn't fit in col2 either -> new page
+          currentCol.removeChild(block);
+
+          await snapPage();
+          clearCols();
+          currentCol = col1;
+
+          currentCol.appendChild(block);
+          await waitImages(block);
+
+          // اگر هنوز هم جا نشد: سوال خیلی بزرگه.
+          // بدون کاهش کیفیت تصویر، فقط چیدمان رو کمی جمع می‌کنیم.
+          if(!fits(currentCol)){
+            block.style.fontSize = "12px";
+            block.style.lineHeight = "1.2";
+          }
+        }
+      } else {
+        // we were in col2 -> new page
+        await snapPage();
+        clearCols();
+        currentCol = col1;
+
+        currentCol.appendChild(block);
+        await waitImages(block);
+
+        if(!fits(currentCol)){
+          block.style.fontSize = "12px";
+          block.style.lineHeight = "1.2";
+        }
       }
+    }
+
+    // اگر col2 پر شد و سوال بعدی باید بره صفحه بعد، خود الگوریتم هندل می‌کنه
+    if(currentCol === col2){
+      // nothing
     }
   }
 
-  if(content.children.length){
+  // last page
+  if(col1.children.length || col2.children.length){
     await snapPage();
   }
 
-  pageImages.forEach((img, idx) => {
+  // Build PDF
+  pages.forEach((img, idx) => {
     if(idx > 0) doc.addPage();
     doc.addImage(img, "PNG", 0, 0, doc.internal.pageSize.getWidth(), doc.internal.pageSize.getHeight());
   });
