@@ -293,7 +293,7 @@ function renderHome(){
     const card = document.createElement("div");
     card.className = "glass-3d card folder-glow";
     card.style.setProperty("--glow", f.color || "#3B82F6");
-    card.style.borderLeft = `4px solid ${f.color || "#3B82F6"}`;
+    // card.style.borderLeft = `4px solid ${f.color || "#3B82F6"}`;
 
     card.onclick = () => openFolder(i);
 
