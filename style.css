@@ -277,3 +277,71 @@ input[type="number"]{ max-width:120px; }
 }
 
 .hidden{ display:none !important; }
+
+
+
+/* --- Fix ugly square around glow on iOS/Safari --- */
+
+/* 1) prevent iOS focus/selection highlight */
+.folder-glow,
+.folder-glow * {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 2) remove focus outline if Safari tries to apply it */
+.folder-glow:focus,
+.folder-glow:focus-visible,
+.folder-glow:active {
+  outline: none !important;
+}
+
+/* 3) make glow smooth and not "boxed" */
+.folder-glow {
+  position: relative;
+  overflow: visible;              /* allow blur to fade naturally */
+  border-radius: 18px;
+  transform: translateZ(0);       /* force proper compositing */
+}
+
+/* glow layer */
+.folder-glow::before{
+  content:"";
+  position:absolute;
+  inset:-10px;                    /* bigger than card so you don't see a hard edge */
+  border-radius: 24px;
+  background: var(--glow, var(--accent-blue));
+  filter: blur(18px);
+  opacity: .30;
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* 4) remove any visible border on the card itself (the box you see) */
+.folder-glow.glass-3d {
+  border-color: transparent !important;
+}
+
+/* optional: keep a super soft border if you want (instead of the ugly one) */
+/*
+.folder-glow.glass-3d {
+  border: 1px solid rgba(255,255,255,0.12) !important;
+}
+*/
+
+
+
+
+/* Safari sometimes draws an inner highlight on click */
+.folder-glow {
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
+
+
+
+
+
+
+
+
