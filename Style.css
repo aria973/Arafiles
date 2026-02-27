@@ -20,6 +20,9 @@
   user-select: none; /* Standard syntax */
 }
 
+html {
+  min-height: 100vh ;
+}
 body.light {
   --bg:#E9EEF5; --text:#0B0E12;
   --glass-bg:rgba(255,255,255,0.60); --glass-border:rgba(0,0,0,0.08);
@@ -30,7 +33,7 @@ body.dark {
 }
 
 body {
-  min-height: 100vh ;
+  height:100%;
   font-family:'Vazirmatn',sans-serif;
   margin:0; background:var(--bg); color:var(--text);
 }
