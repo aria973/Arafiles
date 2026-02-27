@@ -110,6 +110,17 @@ function revokeAllObjectUrls(){
   objectUrlCache.clear();
 }
 
+async function putImageBlobWithId(id, blob){
+  const db = await idbOpen();
+  await new Promise((resolve, reject) => {
+    const store = idbTx(db, "readwrite");
+    const req = store.put({ id, blob, type: blob.type || "image/png", ts: Date.now() });
+    req.onsuccess = resolve;
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+}
+
 // ------------------------------
 // 2) State
 // ------------------------------
@@ -1291,92 +1302,122 @@ async function exportPDF(folderIndex){
 // اینجا برای اینکه "هیچ مشکلی واسه نوع دیتا" پیش نیاد، export شامل تصاویر هم هست.
 // توجه: اگر خیلی تصویر سنگین باشد، فایل JSON خیلی بزرگ می‌شود.
 async function exportData(){
-  const payload = {
-    version: 2,
-    theme: state.theme,
-    background: state.background,
-    folders: JSON.parse(JSON.stringify(state.folders)),
-    images: {} // imageId -> dataURL
-  };
+  try{
+    if(!window.JSZip) throw new Error("JSZip not loaded");
 
-  // جمع‌کردن همه imageId ها
-  const ids = new Set();
-  for(const f of payload.folders){
-    for(const q of (f.questions || [])){
-      if(q.imageId) ids.add(q.imageId);
+    const zip = new JSZip();
+
+    // 1) data.json (متادیتا)
+    const payload = {
+      version: 2,
+      theme: state.theme,
+      background: state.background,
+      exportedAt: new Date().toISOString(),
+      folders: state.folders
+    };
+    zip.file("data.json", JSON.stringify(payload, null, 2));
+
+    // 2) images/ (بلاب اصلی، بدون افت کیفیت)
+    const ids = new Set();
+    for(const f of (state.folders || [])){
+      for(const q of (f.questions || [])){
+        if(q.imageId) ids.add(q.imageId);
+        // اگر هنوز legacy base64 داری:
+        // می‌تونی اینجا هم اضافه کنی ولی بهتره همون imageId باشه
+      }
     }
-  }
 
-  // تبدیل blobها به dataURL (سنگین ولی مطمئن)
-  for(const id of ids){
-    const blob = await getImageBlob(id);
-    if(blob){
-      payload.images[id] = await blobToDataURL(blob);
+    const imgFolder = zip.folder("images");
+
+    for(const id of ids){
+      const blob = await getImageBlob(id);
+      if(!blob) continue;
+      const ext = (blob.type && blob.type.includes("jpeg")) ? "jpg"
+               : (blob.type && blob.type.includes("webp")) ? "webp"
+               : "png";
+      // ذخیره blob خام (کیفیت کامل)
+      imgFolder.file(`${id}.${ext}`, blob, { binary: true });
     }
-  }
 
-  const dataStr = JSON.stringify(payload, null, 2);
-  const blob = new Blob([dataStr], { type:"application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "arafiles-data.json";
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+    // برای سرعت/پایداری روی موبایل: STORE (بدون فشرده‌سازی سنگین)
+    const outBlob = await zip.generateAsync({
+      type: "blob",
+      compression: "STORE"
+    });
+
+    const fileName = `arafiles-backup-${Date.now()}.zip`;
+    const file = new File([outBlob], fileName, { type: "application/zip" });
+
+    // iOS: Share Sheet معمولاً بهتر از دانلود مستقیمه
+    if(navigator.canShare && navigator.canShare({ files: [file] })){
+      await navigator.share({
+        files: [file],
+        title: "Arafiles Backup"
+      });
+      return;
+    }
+
+    // fallback download
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(outBlob);
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+
+  }catch(err){
+    console.error(err);
+    alert("خطا در ساخت فایل خروجی. (JSZip یا ذخیره‌سازی تصاویر مشکل دارد)");
+  }
 }
 
+
 async function importData(file){
-  const reader = new FileReader();
-  reader.onload = async (e) => {
-    try{
-      const payload = JSON.parse(e.target.result);
+  try{
+    if(!window.JSZip) throw new Error("JSZip not loaded");
 
-      // reset current
-      state.folders = [];
-      revokeAllObjectUrls();
+    const zip = await JSZip.loadAsync(file);
 
-      // restore settings
-      if(payload.theme) setTheme(payload.theme);
-      if(payload.background) setBackground(payload.background);
+    const dataFile = zip.file("data.json");
+    if(!dataFile) throw new Error("data.json not found");
 
-      // restore images first
-      const images = payload.images || {};
-      // images are dataURL; store as blobs with same id (keep keys)
-      if(Object.keys(images).length){
-        const db = await idbOpen();
-        await new Promise((resolve, reject) => {
-          const tx = db.transaction(IDB_STORE, "readwrite");
-          const store = tx.objectStore(IDB_STORE);
+    const text = await dataFile.async("string");
+    const payload = JSON.parse(text);
 
-          const entries = Object.entries(images);
-          let pending = entries.length;
-          if(!pending){ resolve(); return; }
+    if(!payload || !Array.isArray(payload.folders)) throw new Error("Invalid data.json");
 
-          for(const [id, dataUrl] of entries){
-            fetch(dataUrl)
-              .then(r => r.blob())
-              .then(blob => {
-                const putReq = store.put({ id, blob, type: blob.type || "image/png", ts: Date.now() });
-                putReq.onsuccess = () => { if(--pending === 0) resolve(); };
-                putReq.onerror = () => reject(putReq.error);
-              })
-              .catch(reject);
-          }
-        });
-        db.close();
+    // تنظیمات
+    if(payload.theme) setTheme(payload.theme);
+    if(payload.background) setBackground(payload.background);
+
+    // تصاویر: هر چی داخل images/ هست رو برگردون داخل IDB
+    const images = zip.folder("images");
+    if(images){
+      const entries = [];
+      images.forEach((path, zf) => { if(!zf.dir) entries.push({ path, zf }); });
+
+      // ذخیره سریالی برای iOS (کمتر لگ/کرش)
+      for(const { path, zf } of entries){
+        const blob = await zf.async("blob");
+        const name = path.split("/").pop();           // id.ext
+        const id = name.split(".")[0];               // id
+        // با همان id ذخیره کن (تا رفرنس‌ها درست بماند)
+        await putImageBlobWithId(id, blob);
       }
-
-      // restore folders
-      state.folders = payload.folders || [];
-      normalize();
-      saveDebounced();
-      renderHome();
-      alert("داده‌ها با موفقیت بارگذاری شدند!");
-    }catch(err){
-      console.error(err);
-      alert("خطا در خواندن فایل JSON");
     }
-  };
-  reader.readAsText(file, "utf-8");
+
+    // state
+    state.folders = payload.folders;
+    normalize();
+    saveDebounced();
+    renderHome();
+
+    alert("بکاپ با موفقیت وارد شد ✅");
+
+  }catch(err){
+    console.error(err);
+    alert("خطا در خواندن فایل (ZIP/JSON خراب است یا ناقص ذخیره شده).");
+  }
 }
 
 // ------------------------------
