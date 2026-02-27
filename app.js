@@ -1373,50 +1373,68 @@ async function exportData(){
 
 
 async function importData(file){
+  const name = (file?.name || "").toLowerCase();
+
   try{
-    if(!window.JSZip) throw new Error("JSZip not loaded");
+    if(name.endsWith(".zip")){
+      // ZIP import
+      if(!window.JSZip) throw new Error("JSZip not loaded");
 
-    const zip = await JSZip.loadAsync(file);
+      const zip = await JSZip.loadAsync(file);
 
-    const dataFile = zip.file("data.json");
-    if(!dataFile) throw new Error("data.json not found");
+      const dataFile = zip.file("data.json");
+      if(!dataFile) throw new Error("data.json not found");
 
-    const text = await dataFile.async("string");
-    const payload = JSON.parse(text);
+      const text = await dataFile.async("string");
+      const payload = JSON.parse(text);
 
-    if(!payload || !Array.isArray(payload.folders)) throw new Error("Invalid data.json");
+      if(!payload || !Array.isArray(payload.folders)) throw new Error("Invalid data.json");
 
-    // تنظیمات
+      // settings
+      if(payload.theme) setTheme(payload.theme);
+      if(payload.background) setBackground(payload.background);
+
+      // images
+      const images = zip.folder("images");
+      if(images){
+        const entries = [];
+        images.forEach((path, zf) => { if(!zf.dir) entries.push({ path, zf }); });
+
+        for(const { path, zf } of entries){
+          const blob = await zf.async("blob");
+          const fileName = path.split("/").pop(); // id.ext
+          const id = fileName.split(".")[0];
+          await putImageBlobWithId(id, blob);
+        }
+      }
+
+      state.folders = payload.folders;
+      normalize();
+      saveDebounced();
+      renderHome();
+      alert("بکاپ ZIP با موفقیت وارد شد ✅");
+      return;
+    }
+
+    // JSON import (قبلی)
+    const text = await file.text();
+    const cleaned = text.replace(/^\uFEFF/, "").trim();
+    const payload = JSON.parse(cleaned);
+
+    if(!payload || !Array.isArray(payload.folders)) throw new Error("Invalid JSON format");
+
     if(payload.theme) setTheme(payload.theme);
     if(payload.background) setBackground(payload.background);
 
-    // تصاویر: هر چی داخل images/ هست رو برگردون داخل IDB
-    const images = zip.folder("images");
-    if(images){
-      const entries = [];
-      images.forEach((path, zf) => { if(!zf.dir) entries.push({ path, zf }); });
-
-      // ذخیره سریالی برای iOS (کمتر لگ/کرش)
-      for(const { path, zf } of entries){
-        const blob = await zf.async("blob");
-        const name = path.split("/").pop();           // id.ext
-        const id = name.split(".")[0];               // id
-        // با همان id ذخیره کن (تا رفرنس‌ها درست بماند)
-        await putImageBlobWithId(id, blob);
-      }
-    }
-
-    // state
     state.folders = payload.folders;
     normalize();
     saveDebounced();
     renderHome();
-
-    alert("بکاپ با موفقیت وارد شد ✅");
+    alert("JSON با موفقیت بارگذاری شد ✅");
 
   }catch(err){
     console.error(err);
-    alert("خطا در خواندن فایل (ZIP/JSON خراب است یا ناقص ذخیره شده).");
+    alert("خطا در خواندن فایل. (فرمت یا محتوا مشکل دارد)");
   }
 }
 
