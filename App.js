@@ -1,6 +1,118 @@
-// ===== Arafiles app.js =====
+// ------------------------------
+// 0) Tiny helpers
+// ------------------------------
+const $ = (id) => document.getElementById(id);
 
-// App state
+function detectDirection(text){
+  return /[\u0600-\u06FF]/.test(text || "") ? "rtl" : "ltr";
+}
+
+// Debounce save
+let _saveTimer = null;
+function saveDebounced(){
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => {
+    try{
+      localStorage.setItem("folders", JSON.stringify(state.folders));
+    }catch(e){
+      console.warn("Save failed (quota/other):", e);
+      alert("فضای ذخیره‌سازی پر شده یا ذخیره‌سازی با مشکل مواجه شد. (تصاویر داخل دیتابیس ذخیره می‌شوند، ولی متادیتا ممکن است ذخیره نشده باشد.)");
+    }
+  }, 250);
+}
+
+// ------------------------------
+// 1) IndexedDB for images (no more base64 in localStorage)
+// ------------------------------
+const IDB_DB_NAME = "arafiles_db";
+const IDB_DB_VER = 1;
+const IDB_STORE = "images";
+
+function idbOpen(){
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_DB_NAME, IDB_DB_VER);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if(!db.objectStoreNames.contains(IDB_STORE)){
+        db.createObjectStore(IDB_STORE, { keyPath: "id" });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbTx(db, mode){
+  return db.transaction(IDB_STORE, mode).objectStore(IDB_STORE);
+}
+
+function genId(){
+  return "img_" + crypto.getRandomValues(new Uint32Array(4)).join("_");
+}
+
+async function saveImageBlob(blob){
+  const db = await idbOpen();
+  const id = genId();
+  await new Promise((resolve, reject) => {
+    const store = idbTx(db, "readwrite");
+    const req = store.put({ id, blob, type: blob.type || "image/png", ts: Date.now() });
+    req.onsuccess = resolve;
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+  return id;
+}
+
+async function getImageBlob(id){
+  const db = await idbOpen();
+  const item = await new Promise((resolve, reject) => {
+    const store = idbTx(db, "readonly");
+    const req = store.get(id);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+  return item ? item.blob : null;
+}
+
+async function deleteImageBlob(id){
+  const db = await idbOpen();
+  await new Promise((resolve, reject) => {
+    const store = idbTx(db, "readwrite");
+    const req = store.delete(id);
+    req.onsuccess = resolve;
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+}
+
+function blobToDataURL(blob){
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+// Cache object URLs to avoid re-creating
+const objectUrlCache = new Map(); // imageId -> objectURL
+async function getObjectUrlForImage(id){
+  if(objectUrlCache.has(id)) return objectUrlCache.get(id);
+  const blob = await getImageBlob(id);
+  if(!blob) return null;
+  const url = URL.createObjectURL(blob);
+  objectUrlCache.set(id, url);
+  return url;
+}
+function revokeAllObjectUrls(){
+  for(const url of objectUrlCache.values()) URL.revokeObjectURL(url);
+  objectUrlCache.clear();
+}
+
+// ------------------------------
+// 2) State
+// ------------------------------
 let state = {
   view: "home",
   currentFolderIndex: null,
@@ -11,24 +123,41 @@ let state = {
   pendingImageBlobUrl: null
 };
 
-function save(){ localStorage.setItem("folders", JSON.stringify(state.folders)); }
+// Normalize old data (if any old q.image base64 exists, keep it but don’t resave it)
+function normalize(){
+  for(const f of state.folders){
+    f.questions = f.questions || [];
+    f.perPage = f.perPage || 6;
+    f.numberAlign = f.numberAlign || "right";
+    for(const q of f.questions){
+      // Legacy: q.image might exist as base64; keep it for display/export until user edits it.
+      // New: q.imageId
+      if(q.imageId && q.image){
+        // keep only imageId preferred
+        delete q.image;
+      }
+    }
+  }
+}
+normalize();
+
+// ------------------------------
+// 3) Service Worker (correct path)
+// ------------------------------
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("sw.js")
-    .then(() => console.log("Service Worker registered"))
+  navigator.serviceWorker.register("./sw.js")
     .catch(err => console.error("SW registration failed:", err));
 }
 
-// Theme + Background
-function setTheme(mode){
-  state.theme = mode; localStorage.setItem("theme", mode);
-  document.body.classList.remove("dark","light");
-  document.body.classList.add(mode==="dark"?"dark":"light");
-  applyBackground(state.background);
-}
-function setBackground(key){ state.background = key; localStorage.setItem("background", key); }
+// ------------------------------
+// 4) Theme + Background
+// ------------------------------
 function applyBackground(key){
   document.body.style.backgroundImage = "none";
   document.body.style.backgroundColor = "";
+  document.body.style.backgroundSize = "";
+  document.body.style.backgroundPosition = "";
+
   if(key==="gradient1"){
     document.body.style.backgroundImage = "linear-gradient(120deg,#1f2937,#3b82f6 100%)";
   } else if(key==="gradient2"){
@@ -36,37 +165,80 @@ function applyBackground(key){
   } else if(key==="grid"){
     document.body.style.backgroundImage = "radial-gradient(#64748b 1px,transparent 1px)";
     document.body.style.backgroundSize = "24px 24px";
+  } else if(key==="plain"){
+    document.body.style.backgroundColor = getComputedStyle(document.body).getPropertyValue("--bg");
+  } else if(key==="glass"){
+    document.body.style.backgroundImage = "linear-gradient(140deg, rgba(255,255,255,0.18), rgba(255,255,255,0.02))";
   } else {
     document.body.style.backgroundColor = getComputedStyle(document.body).getPropertyValue("--bg");
   }
 }
-function setBackgroundTile(el){
-  document.querySelectorAll(".preview-tile").forEach(t=>t.classList.remove("active"));
-  el.classList.add("active");
-  const key = el.getAttribute("data-bg");
-  setBackground(key); applyBackground(key);
+
+function setTheme(mode){
+  state.theme = mode;
+  localStorage.setItem("theme", mode);
+  document.body.classList.remove("dark","light");
+  document.body.classList.add(mode==="dark" ? "dark" : "light");
+  applyBackground(state.background);
 }
 
-// Settings modal control
+function setBackground(key){
+  state.background = key;
+  localStorage.setItem("background", key);
+  applyBackground(key);
+}
+
 function closeSettings(){
-  document.getElementById("settingsOverlay").classList.remove("active");
+  const ov = $("settingsOverlay");
+  ov.classList.remove("active");
+  ov.setAttribute("aria-hidden", "true");
 }
 
-// Reset (sequential)
-function openResetConfirm(){
-  const ov = document.getElementById("resetOverlay");
+function openSettings(){
+  const ov = $("settingsOverlay");
   ov.classList.add("active");
-  document.getElementById("resetStep1").classList.remove("hidden");
-  document.getElementById("resetStep2").classList.add("hidden");
+  ov.setAttribute("aria-hidden", "false");
 }
-function toResetStep2(){
-  document.getElementById("resetStep1").classList.add("hidden");
-  document.getElementById("resetStep2").classList.remove("hidden");
+
+// ------------------------------
+// 5) Reset
+// ------------------------------
+function openResetConfirm(){
+  const ov = $("resetOverlay");
+  ov.classList.add("active");
+  ov.setAttribute("aria-hidden", "false");
+  $("resetStep1").classList.remove("hidden");
+  $("resetStep2").classList.add("hidden");
 }
+
 function closeReset(){
-  document.getElementById("resetOverlay").classList.remove("active");
+  const ov = $("resetOverlay");
+  ov.classList.remove("active");
+  ov.setAttribute("aria-hidden", "true");
 }
-function doFullReset(){
+
+function toResetStep2(){
+  $("resetStep1").classList.add("hidden");
+  $("resetStep2").classList.remove("hidden");
+}
+
+async function doFullReset(){
+  // پاک کردن تصاویر
+  try{
+    const db = await idbOpen();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.clear();
+      req.onsuccess = resolve;
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
+  }catch(e){
+    console.warn("IDB clear failed:", e);
+  }
+
+  revokeAllObjectUrls();
   localStorage.clear();
   state.folders = [];
   closeReset();
@@ -74,204 +246,330 @@ function doFullReset(){
   renderHome();
 }
 
-// Email
-function sendEmail(){ window.location.href = "mailto:Aria973@yahoo.com?subject=نقد یا پرسش درباره Arafiles"; }
-
-// Global header controls
-document.getElementById("backBtn").onclick = () => renderHome();
-document.getElementById("settingsBtn").onclick = () => {
-  document.getElementById("settingsOverlay").classList.add("active");
-};
-// Floating add folder button will be shown only in Home (controlled in views)
-const floatingAdd = document.getElementById("floatingAdd");
-if (floatingAdd) floatingAdd.onclick = addFolder;
-// Render Home (show floating add)
-function renderHome(){
-  state.view = "home"; state.currentFolderIndex = null;
-  const app = document.getElementById("app"); app.innerHTML = "";
-  document.getElementById("floatingAdd").style.display = "flex";
-
-  if(state.folders.length === 0){
-    const empty = document.createElement("div"); empty.className = "glass-3d card empty";
-    empty.innerHTML = "<p>هیچ فایلی وجود ندارد</p>"; app.appendChild(empty);
-  } else {
-    const grid = document.createElement("div"); grid.className = "grid";
-    state.folders.forEach((f,i)=>{
-      const card = document.createElement("div");
-      card.className = "glass-3d card folder-glow";
-      card.style.setProperty("--glow", f.color || "#3B82F6");
-      card.style.borderLeft = `4px solid ${f.color || "#3B82F6"}`;
-      card.onclick = () => openFolder(i);
-      card.innerHTML = `
-        <div style="display:flex; align-items:center; justify-content:space-between;">
-          <div style="display:flex; align-items:center; gap:8px;">
-            <span class="material-icons-outlined">folder</span>
-            <h3>${f.name}</h3>
-          </div>
-          <div style="display:flex; gap:6px;">
-            <button class="icon-btn" onclick="event.stopPropagation(); editFolder(${i})"><span class="material-icons-outlined">edit</span></button>
-            <button class="icon-btn danger" onclick="event.stopPropagation(); deleteFolder(${i})"><span class="material-icons-outlined">delete</span></button>
-          </div>
-        </div>
-        <p>${f.desc || "—"}</p>
-        <small>${(f.questions||[]).length} سوال</small>`;
-      grid.appendChild(card);
-    });
-    app.appendChild(grid);
-  }
+// ------------------------------
+// 6) Email
+// ------------------------------
+function sendEmail(){
+  window.location.href = "mailto:Aria973@yahoo.com?subject=نقد یا پرسش درباره Arafiles";
 }
 
-// Add/Delete folder
+// ------------------------------
+// 7) UI Rendering
+// ------------------------------
+const floatingAdd = $("floatingAdd");
+
+function renderHome(){
+  state.view = "home";
+  state.currentFolderIndex = null;
+  revokeAllObjectUrls();
+
+  const app = $("app");
+  app.innerHTML = "";
+  floatingAdd.style.display = "flex";
+
+  if(state.folders.length === 0){
+    const empty = document.createElement("div");
+    empty.className = "glass-3d card empty";
+    empty.innerHTML = "<p>هیچ فایلی وجود ندارد</p>";
+    app.appendChild(empty);
+    return;
+  }
+
+  const grid = document.createElement("div");
+  grid.className = "grid";
+
+  state.folders.forEach((f,i) => {
+    const card = document.createElement("div");
+    card.className = "glass-3d card folder-glow";
+    card.style.setProperty("--glow", f.color || "#3B82F6");
+    card.style.borderLeft = `4px solid ${f.color || "#3B82F6"}`;
+
+    card.onclick = () => openFolder(i);
+
+    card.innerHTML = `
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span class="material-icons-outlined">folder</span>
+          <h3 style="margin:0;">${escapeHtml(f.name)}</h3>
+        </div>
+        <div style="display:flex; gap:6px;">
+          <button class="icon-btn" data-action="edit" title="ویرایش"><span class="material-icons-outlined">edit</span></button>
+          <button class="icon-btn danger" data-action="delete" title="حذف"><span class="material-icons-outlined">delete</span></button>
+        </div>
+      </div>
+      <p style="margin:10px 0 0;">${escapeHtml(f.desc || "—")}</p>
+      <small>${(f.questions||[]).length} سوال</small>
+    `;
+
+    card.querySelector('[data-action="edit"]').onclick = (e) => {
+      e.stopPropagation();
+      editFolder(i);
+    };
+    card.querySelector('[data-action="delete"]').onclick = (e) => {
+      e.stopPropagation();
+      deleteFolder(i);
+    };
+
+    grid.appendChild(card);
+  });
+
+  app.appendChild(grid);
+}
+
+function escapeHtml(s){
+  return String(s || "")
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;")
+    .replaceAll("'","&#039;");
+}
+
+// ------------------------------
+// 8) Folder CRUD
+// ------------------------------
 function addFolder(){
   const name = prompt("نام پوشه:");
   if(!name) return;
   const desc = prompt("توضیحات:") || "";
-  state.folders.push({ name, desc, color:"#3B82F6", questions:[], perPage:6, numberAlign:"right" });
-  save(); renderHome();
+  state.folders.push({
+    name, desc,
+    color:"#3B82F6",
+    questions:[],
+    perPage:6,
+    numberAlign:"right"
+  });
+  saveDebounced();
+  renderHome();
 }
+
 function deleteFolder(i){
   if(!confirm("این پوشه حذف شود؟")) return;
-  state.folders.splice(i,1); save(); renderHome();
+  state.folders.splice(i, 1);
+  saveDebounced();
+  renderHome();
 }
 
-// Open folder (hide floating add)
-function openFolder(i){
-  state.view = "folder"; state.currentFolderIndex = i;
+function editFolder(i){
   const f = state.folders[i];
-  const app = document.getElementById("app"); app.innerHTML = "";
-  document.getElementById("floatingAdd").style.display = "none";
 
-  const header = document.createElement("div"); header.className="glass-3d card";
-  header.innerHTML = `<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-    <strong>عنوان:</strong><span>${f.name}</span><span class="spacer"></span>
-    <button class="icon-btn" id="editFolderBtn"><span class="material-icons-outlined">settings</span></button>
-    <label>تعداد سوال در هر صفحه</label><input id="perPage" type="number" min="2" max="20" value="${f.perPage||6}" />
-    <label>جهت شماره‌گذاری</label>
-    <select id="numberAlign">
-      <option value="right" ${f.numberAlign==="right"?"selected":""}>راست</option>
-      <option value="left" ${f.numberAlign==="left"?"selected":""}>چپ</option>
-    </select>
-    <button class="icon-btn" id="exportPDF"><span class="material-icons-outlined">picture_as_pdf</span></button>
-    <button class="icon-btn" id="exportPNG"><span class="material-icons-outlined">image</span></button>
-  </div>`;
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay active";
+
+  const panel = document.createElement("div");
+  panel.className = "modal-panel glass-3d";
+
+  panel.innerHTML = `
+    <div class="modal-header">
+      <h2>تنظیمات پوشه</h2>
+      <button class="icon-btn" data-close="1"><span class="material-icons-outlined">close</span></button>
+    </div>
+    <div class="modal-body">
+      <label>نام:</label><input id="folderName" value="${escapeHtml(f.name)}" />
+      <label>توضیحات:</label><input id="folderDesc" value="${escapeHtml(f.desc || "")}" />
+      <label>رنگ:</label><input id="folderColor" type="color" value="${escapeHtml(f.color || "#3B82F6")}" />
+      <div class="row-inline"><button class="primary" id="saveFolder">ذخیره</button></div>
+    </div>
+  `;
+
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+
+  const close = () => document.body.removeChild(overlay);
+
+  panel.querySelector('[data-close="1"]').onclick = close;
+  panel.querySelector("#saveFolder").onclick = () => {
+    f.name = panel.querySelector("#folderName").value;
+    f.desc = panel.querySelector("#folderDesc").value;
+    f.color = panel.querySelector("#folderColor").value;
+    saveDebounced();
+    close();
+    (state.view==="folder" ? openFolder(i) : renderHome());
+  };
+}
+
+// ------------------------------
+// 9) Folder View + Questions
+// ------------------------------
+let _wrapDragBound = false;
+
+function openFolder(i){
+  state.view = "folder";
+  state.currentFolderIndex = i;
+  revokeAllObjectUrls();
+
+  const f = state.folders[i];
+  const app = $("app");
+  app.innerHTML = "";
+  floatingAdd.style.display = "none";
+
+  const header = document.createElement("div");
+  header.className = "glass-3d card";
+  header.innerHTML = `
+    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:center;">
+      <strong>عنوان:</strong><span>${escapeHtml(f.name)}</span><span class="spacer" style="flex:1;"></span>
+
+      <button class="icon-btn" id="editFolderBtn" title="تنظیمات پوشه">
+        <span class="material-icons-outlined">settings</span>
+      </button>
+
+      <label style="opacity:.9;">تعداد سوال در هر صفحه</label>
+      <input id="perPage" type="number" min="2" max="20" value="${f.perPage || 6}" />
+
+      <label style="opacity:.9;">جهت شماره‌گذاری</label>
+      <select id="numberAlign">
+        <option value="right" ${f.numberAlign==="right"?"selected":""}>راست</option>
+        <option value="left" ${f.numberAlign==="left"?"selected":""}>چپ</option>
+      </select>
+
+      <button class="icon-btn" id="exportPDF" title="خروجی PDF">
+        <span class="material-icons-outlined">picture_as_pdf</span>
+      </button>
+      <button class="icon-btn" id="exportPNG" title="خروجی PNG">
+        <span class="material-icons-outlined">image</span>
+      </button>
+    </div>
+  `;
   app.appendChild(header);
-  document.getElementById("editFolderBtn").onclick = () => editFolder(i);
-  document.getElementById("exportPDF").onclick = () => exportPDF(i);
-  document.getElementById("exportPNG").onclick = () => exportPNG(i);
-  document.getElementById("perPage").onchange = e => { f.perPage = +e.target.value; save(); };
-  document.getElementById("numberAlign").onchange = e => { f.numberAlign = e.target.value; save(); renderQuestions(i); };
 
-  const controls = document.createElement("div"); controls.className = "glass-3d card";
-  controls.innerHTML = `<div style="display:flex; gap:8px;">
-    <button class="primary" id="addTextQ"><span class="material-icons-outlined">note_add</span></button>
-    <button class="primary" id="addImageQ"><span class="material-icons-outlined">add_photo_alternate</span></button>
-  </div>`;
+  header.querySelector("#editFolderBtn").onclick = () => editFolder(i);
+  header.querySelector("#exportPDF").onclick = () => exportPDF(i);
+  header.querySelector("#exportPNG").onclick = () => exportPNG(i);
+  header.querySelector("#perPage").onchange = (e) => { f.perPage = +e.target.value; saveDebounced(); };
+  header.querySelector("#numberAlign").onchange = (e) => { f.numberAlign = e.target.value; saveDebounced(); renderQuestions(i); };
+
+  const controls = document.createElement("div");
+  controls.className = "glass-3d card";
+  controls.innerHTML = `
+    <div style="display:flex; gap:8px; justify-content:center;">
+      <button class="primary" id="addTextQ"><span class="material-icons-outlined">note_add</span></button>
+      <button class="primary" id="addImageQ"><span class="material-icons-outlined">add_photo_alternate</span></button>
+    </div>
+  `;
   app.appendChild(controls);
-  document.getElementById("addTextQ").onclick = () => addTextQuestion(i);
-  document.getElementById("addImageQ").onclick = () => openCrop(i);
 
-  const listWrap = document.createElement("div"); listWrap.id="questions"; app.appendChild(listWrap);
+  controls.querySelector("#addTextQ").onclick = () => addTextQuestion(i);
+  controls.querySelector("#addImageQ").onclick = () => openCrop(i);
+
+  const listWrap = document.createElement("div");
+  listWrap.id = "questions";
+  app.appendChild(listWrap);
+
+  // bind dragover once
+  if(!_wrapDragBound){
+    listWrap.addEventListener("dragover", e => e.preventDefault());
+    _wrapDragBound = true;
+  }
+
   renderQuestions(i);
 }
 
-// Edit folder with modal
-function editFolder(i){
-  const f = state.folders[i];
-  const overlay = document.createElement("div"); overlay.className="modal-overlay active";
-  const panel = document.createElement("div"); panel.className="modal-panel glass-3d";
-  panel.innerHTML = `
-    <div class="modal-header"><h2>تنظیمات پوشه</h2>
-      <button class="icon-btn" id="closeFolderSettings"><span class="material-icons-outlined">close</span></button>
-    </div>
-    <div class="modal-body">
-      <label>نام:</label><input id="folderName" value="${f.name}" />
-      <label>توضیحات:</label><input id="folderDesc" value="${f.desc||""}" />
-      <label>رنگ:</label><input id="folderColor" type="color" value="${f.color||"#3B82F6"}" />
-      <div class="row-inline"><button class="primary" id="saveFolder">ذخیره</button></div>
-    </div>`;
-  overlay.appendChild(panel); document.body.appendChild(overlay);
-
-  panel.querySelector("#saveFolder").onclick = () => {
-    f.name = document.getElementById("folderName").value;
-    f.desc = document.getElementById("folderDesc").value;
-    f.color = document.getElementById("folderColor").value;
-    save(); document.body.removeChild(overlay);
-    (state.view==="folder" ? openFolder(i) : renderHome());
-  };
-  panel.querySelector("#closeFolderSettings").onclick = () => document.body.removeChild(overlay);
-}
-// Direction detection
-function detectDirection(text){ return /[\u0600-\u06FF]/.test(text) ? "rtl" : "ltr"; }
-
-// Render questions
-function renderQuestions(folderIndex){
+async function renderQuestions(folderIndex){
   const f = state.folders[folderIndex];
-  const wrap = document.getElementById("questions");
+  const wrap = $("questions");
   wrap.innerHTML = "";
 
   if(!f.questions || f.questions.length === 0){
-    const empty = document.createElement("div"); empty.className = "glass-3d card empty";
+    const empty = document.createElement("div");
+    empty.className = "glass-3d card empty";
     empty.innerHTML = "<p>هنوز سوالی اضافه نشده است.</p>";
     wrap.appendChild(empty);
     return;
   }
 
-  wrap.addEventListener("dragover", e => e.preventDefault());
+  for(let idx=0; idx < f.questions.length; idx++){
+    const q = f.questions[idx];
 
-  f.questions.forEach((q, idx) => {
     const card = document.createElement("div");
     card.className = "glass-3d card question";
     card.draggable = true;
     card.setAttribute("dir", detectDirection(q.text || ""));
-    if (q.align) card.setAttribute("align", q.align);
+    if(q.align) card.setAttribute("align", q.align);
 
-    // top row
-    const top = document.createElement("div"); top.className = "top-row";
+    const top = document.createElement("div");
+    top.className = "top-row";
+
     const label = (q.text && q.text.trim().length) ? `${idx+1}. ${q.text}` : `${idx+1}.`;
     const strong = document.createElement("strong");
     strong.textContent = label;
-    strong.style.textAlign = f.numberAlign || "right"; // راست یا چپ چین شماره سوالات
+    strong.style.textAlign = f.numberAlign || "right";
     top.appendChild(strong);
 
-    const spacer = document.createElement("span"); spacer.className="spacer"; top.appendChild(spacer);
+    const spacer = document.createElement("span");
+    spacer.className = "spacer";
+    top.appendChild(spacer);
 
-    const actions = document.createElement("div"); actions.className="actions";
-    const editBtn = document.createElement("button"); editBtn.className="secondary"; editBtn.innerHTML=`<span class="material-icons-outlined">edit</span>`; editBtn.onclick=()=>editQuestion(folderIndex, idx);
-    const delBtn = document.createElement("button"); delBtn.className="danger"; delBtn.innerHTML=`<span class="material-icons-outlined">delete</span>`; delBtn.onclick=()=>deleteQuestion(folderIndex, idx);
-    const alignBtn = document.createElement("button"); alignBtn.className="secondary"; alignBtn.innerHTML=`<span class="material-icons-outlined">format_align_center</span>`;
-    alignBtn.onclick=()=>{
+    const actions = document.createElement("div");
+    actions.className = "actions";
+
+    const editBtn = document.createElement("button");
+    editBtn.className = "secondary";
+    editBtn.innerHTML = `<span class="material-icons-outlined">edit</span>`;
+    editBtn.onclick = () => editQuestion(folderIndex, idx);
+
+    const delBtn = document.createElement("button");
+    delBtn.className = "danger";
+    delBtn.innerHTML = `<span class="material-icons-outlined">delete</span>`;
+    delBtn.onclick = () => deleteQuestion(folderIndex, idx);
+
+    const alignBtn = document.createElement("button");
+    alignBtn.className = "secondary";
+    alignBtn.innerHTML = `<span class="material-icons-outlined">format_align_center</span>`;
+    alignBtn.onclick = () => {
       q.align = q.align==="center" ? "right" : q.align==="right" ? "left" : "center";
-      save(); renderQuestions(folderIndex);
+      saveDebounced();
+      renderQuestions(folderIndex);
     };
-    actions.appendChild(editBtn); actions.appendChild(delBtn); actions.appendChild(alignBtn);
-    top.appendChild(actions); card.appendChild(top);
 
-    // image
-    if(q.image){
-      const img = document.createElement("img"); img.className="question-img"; img.src = q.image;
+    actions.appendChild(editBtn);
+    actions.appendChild(delBtn);
+    actions.appendChild(alignBtn);
+    top.appendChild(actions);
+    card.appendChild(top);
+
+    // image (new: imageId from IDB; legacy: q.image dataURL)
+    if(q.imageId){
+      const url = await getObjectUrlForImage(q.imageId);
+      if(url){
+        const img = document.createElement("img");
+        img.className = "question-img";
+        img.src = url;
+        card.appendChild(img);
+      }
+    } else if(q.image){
+      const img = document.createElement("img");
+      img.className = "question-img";
+      img.src = q.image;
       card.appendChild(img);
     }
 
-    // options with LTR labels (a,b,c)
+    // options
     if(q.options && q.options.length){
-      const ul = document.createElement("ul"); ul.className="options";
+      const ul = document.createElement("ul");
+      ul.className = "options";
       q.options.forEach((o,j)=>{
         const li = document.createElement("li");
+
         const labelSpan = document.createElement("span");
-        labelSpan.style.direction="ltr"; labelSpan.style.unicodeBidi="isolate";
-        labelSpan.style.marginInlineEnd="6px";
+        labelSpan.style.direction = "ltr";
+        labelSpan.style.unicodeBidi = "isolate";
+        labelSpan.style.marginInlineEnd = "6px";
         labelSpan.textContent = `(${String.fromCharCode(97+j)})`;
-        const textSpan = document.createElement("span"); textSpan.textContent = o;
-        li.appendChild(labelSpan); li.appendChild(textSpan);
+
+        const textSpan = document.createElement("span");
+        textSpan.textContent = o;
+
+        li.appendChild(labelSpan);
+        li.appendChild(textSpan);
         ul.appendChild(li);
       });
       card.appendChild(ul);
     }
 
-    // DnD
+    // Drag & drop reorder
     card.addEventListener("dragstart", e => {
       e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData("index", idx);
+      e.dataTransfer.setData("index", String(idx));
     });
     card.addEventListener("dragover", e => e.preventDefault());
     card.addEventListener("drop", e => {
@@ -279,33 +577,41 @@ function renderQuestions(folderIndex){
       const from = +e.dataTransfer.getData("index");
       const to = idx;
       if(Number.isNaN(from) || from===to) return;
+
       const arr = f.questions;
       const moved = arr.splice(from,1)[0];
       arr.splice(to,0,moved);
-      save(); renderQuestions(folderIndex);
+
+      saveDebounced();
+      renderQuestions(folderIndex);
     });
 
     wrap.appendChild(card);
-  });
+  }
 }
-// Add text question (blank allowed)
+
 function addTextQuestion(folderIndex){
   const text = prompt("متن سوال (می‌تواند خالی باشد):") || "";
   const q = { type:"text", text, options:[] };
   state.folders[folderIndex].questions.push(q);
-  save(); renderQuestions(folderIndex);
+  saveDebounced();
+  renderQuestions(folderIndex);
   openOptionsEditor(folderIndex, state.folders[folderIndex].questions.length-1);
 }
 
-// Options editor
 function openOptionsEditor(folderIndex, idx){
   const q = state.folders[folderIndex].questions[idx];
-  const overlay = document.createElement("div"); overlay.className="modal-overlay active";
-  const panel = document.createElement("div"); panel.className="modal-panel glass-3d";
+
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay active";
+
+  const panel = document.createElement("div");
+  panel.className = "modal-panel glass-3d";
+
   panel.innerHTML = `
     <div class="modal-header">
       <h2>گزینه‌ها</h2>
-      <button class="icon-btn" id="closeOpt"><span class="material-icons-outlined">close</span></button>
+      <button class="icon-btn" data-close="1"><span class="material-icons-outlined">close</span></button>
     </div>
     <div class="modal-body">
       <div id="optList" class="row"></div>
@@ -313,42 +619,70 @@ function openOptionsEditor(folderIndex, idx){
         <button class="primary" id="addOpt"><span class="material-icons-outlined">add</span></button>
         <button class="secondary" id="doneOpt"><span class="material-icons-outlined">check</span></button>
       </div>
-    </div>`;
-  overlay.appendChild(panel); document.body.appendChild(overlay);
+    </div>
+  `;
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
 
   const renderOpts = () => {
-    const wrap = panel.querySelector("#optList"); wrap.innerHTML = "";
+    const wrap = panel.querySelector("#optList");
+    wrap.innerHTML = "";
     (q.options || []).forEach((o,i)=>{
-      const row = document.createElement("div"); row.className="row-inline";
+      const row = document.createElement("div");
+      row.className = "row-inline";
       row.innerHTML = `
         <span style="direction:ltr; unicode-bidi:isolate;">(${String.fromCharCode(97+i)})</span>
-        <input value="${o}" data-idx="${i}" />
-        <button class="icon-btn danger" data-del="${i}"><span class="material-icons-outlined">close</span></button>`;
+        <input value="${escapeHtml(o)}" data-idx="${i}" />
+        <button class="icon-btn danger" data-del="${i}"><span class="material-icons-outlined">close</span></button>
+      `;
       wrap.appendChild(row);
     });
+
     wrap.querySelectorAll("input").forEach(inp=>{
-      inp.onchange = e => { q.options[+e.target.dataset.idx] = e.target.value; save(); renderQuestions(folderIndex); };
+      inp.oninput = (e) => {
+        q.options[+e.target.dataset.idx] = e.target.value;
+        saveDebounced();
+      };
     });
+
     wrap.querySelectorAll("[data-del]").forEach(btn=>{
-      btn.onclick = e => { const i = +e.currentTarget.dataset.del; q.options.splice(i,1); save(); renderOpts(); renderQuestions(folderIndex); };
+      btn.onclick = (e) => {
+        const i = +e.currentTarget.dataset.del;
+        q.options.splice(i,1);
+        saveDebounced();
+        renderOpts();
+        renderQuestions(folderIndex);
+      };
     });
   };
+
   renderOpts();
 
-  panel.querySelector("#addOpt").onclick = () => { q.options.push(""); save(); renderOpts(); renderQuestions(folderIndex); };
-  const close = () => { document.body.removeChild(overlay); };
-  panel.querySelector("#doneOpt").onclick = close; panel.querySelector("#closeOpt").onclick = close;
+  panel.querySelector("#addOpt").onclick = () => {
+    q.options.push("");
+    saveDebounced();
+    renderOpts();
+    renderQuestions(folderIndex);
+  };
+
+  const close = () => document.body.removeChild(overlay);
+  panel.querySelector("#doneOpt").onclick = close;
+  panel.querySelector('[data-close="1"]').onclick = close;
 }
 
-// Edit question
 function editQuestion(folderIndex, idx){
   const q = state.folders[folderIndex].questions[idx];
-  const overlay = document.createElement("div"); overlay.className="modal-overlay active";
-  const panel = document.createElement("div"); panel.className="modal-panel glass-3d";
+
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay active";
+
+  const panel = document.createElement("div");
+  panel.className = "modal-panel glass-3d";
+
   panel.innerHTML = `
     <div class="modal-header">
       <h2>ویرایش سوال</h2>
-      <button class="icon-btn" id="closeEditQ"><span class="material-icons-outlined">close</span></button>
+      <button class="icon-btn" data-close="1"><span class="material-icons-outlined">close</span></button>
     </div>
     <div class="modal-body">
       <div class="row-inline">
@@ -357,45 +691,85 @@ function editQuestion(folderIndex, idx){
         <button class="secondary" id="editImage"><span class="material-icons-outlined">image</span> تصویر جدید</button>
         <button class="secondary" id="cropImage"><span class="material-icons-outlined">crop</span> کراپ تصویر</button>
       </div>
-    </div>`;
-  overlay.appendChild(panel); document.body.appendChild(overlay);
+    </div>
+  `;
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
 
   panel.querySelector("#editText").onclick = () => {
     const nt = prompt("ویرایش متن سوال (می‌تواند خالی باشد):", q.text || "");
     if (nt !== null) q.text = nt;
-    save(); renderQuestions(folderIndex);
+    saveDebounced();
+    renderQuestions(folderIndex);
   };
+
   panel.querySelector("#editOptions").onclick = () => openOptionsEditor(folderIndex, idx);
-  panel.querySelector("#editImage").onclick = () => {
-    const input = document.createElement("input"); input.type="file"; input.accept="image/*";
-    input.onchange = e => {
-      const file = e.target.files[0]; if(!file) return;
-      const rdr = new FileReader();
-      rdr.onload = () => { q.image = rdr.result; save(); renderQuestions(folderIndex); };
-      rdr.readAsDataURL(file);
+
+  panel.querySelector("#editImage").onclick = async () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.onchange = async (e) => {
+      const file = e.target.files[0];
+      if(!file) return;
+
+      // save blob to IDB without changing quality
+      const id = await saveImageBlob(file);
+
+      // delete old if existed
+      if(q.imageId) await deleteImageBlob(q.imageId);
+
+      q.imageId = id;
+      delete q.image; // legacy
+      saveDebounced();
+      renderQuestions(folderIndex);
     };
     input.click();
   };
-  panel.querySelector("#cropImage").onclick = () => {
-    if(!q.image){ alert("هیچ تصویری برای کراپ وجود ندارد."); return; }
-    openCropExisting(folderIndex, idx, q.image);
+
+  panel.querySelector("#cropImage").onclick = async () => {
+    if(q.imageId){
+      const blob = await getImageBlob(q.imageId);
+      if(!blob){ alert("تصویر پیدا نشد."); return; }
+      const url = URL.createObjectURL(blob);
+      openCropExisting(folderIndex, idx, url, q.imageId);
+      return;
+    }
+    if(q.image){
+      openCropExisting(folderIndex, idx, q.image, null);
+      return;
+    }
+    alert("هیچ تصویری برای کراپ وجود ندارد.");
   };
-  const close = () => { document.body.removeChild(overlay); };
-  panel.querySelector("#closeEditQ").onclick = close;
+
+  const close = () => document.body.removeChild(overlay);
+  panel.querySelector('[data-close="1"]').onclick = close;
 }
 
-// Delete question
-function deleteQuestion(folderIndex, idx){
+async function deleteQuestion(folderIndex, idx){
+  const q = state.folders[folderIndex].questions[idx];
+  if(q?.imageId){
+    try{ await deleteImageBlob(q.imageId); }catch{}
+  }
   state.folders[folderIndex].questions.splice(idx, 1);
-  save(); renderQuestions(folderIndex);
+  saveDebounced();
+  renderQuestions(folderIndex);
 }
-// Crop new image
+
+// ------------------------------
+// 10) Cropper (stores blob in IDB, no base64)
+// ------------------------------
 function openCrop(folderIndex){
-  const overlay = document.createElement("div"); overlay.className="modal-overlay active";
-  const panel = document.createElement("div"); panel.className="modal-panel glass-3d";
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay active";
+
+  const panel = document.createElement("div");
+  panel.className = "modal-panel glass-3d";
+
   panel.innerHTML = `
-    <div class="modal-header"><h2>کراپ تصویر</h2>
-      <button class="icon-btn" id="closeCrop"><span class="material-icons-outlined">close</span></button>
+    <div class="modal-header">
+      <h2>کراپ تصویر</h2>
+      <button class="icon-btn" data-close="1"><span class="material-icons-outlined">close</span></button>
     </div>
     <div class="modal-body">
       <input id="imageInput" type="file" accept="image/*" />
@@ -404,40 +778,74 @@ function openCrop(folderIndex){
         <button class="primary" id="saveCropped"><span class="material-icons-outlined">save</span></button>
         <button class="secondary" id="cancelCrop"><span class="material-icons-outlined">close</span></button>
       </div>
-    </div>`;
-  overlay.appendChild(panel); document.body.appendChild(overlay);
+    </div>
+  `;
 
-  const input = panel.querySelector("#imageInput"); const area = panel.querySelector("#cropArea");
-  input.onchange = e => {
-    const file = e.target.files[0]; if(!file) return;
-    const url = URL.createObjectURL(file); state.pendingImageBlobUrl = url;
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+
+  const input = panel.querySelector("#imageInput");
+  const area = panel.querySelector("#cropArea");
+
+  input.onchange = (e) => {
+    const file = e.target.files[0];
+    if(!file) return;
+
+    const url = URL.createObjectURL(file);
+    state.pendingImageBlobUrl = url;
+
     area.innerHTML = "";
-    const img = document.createElement("img"); img.src = url; img.style.maxWidth = "100%";
+    const img = document.createElement("img");
+    img.src = url;
+    img.style.maxWidth = "100%";
     area.appendChild(img);
-    state.cropper = new Cropper(img, { viewMode:1, dragMode:'move', autoCropArea:0.85, background:false });
+
+    state.cropper = new Cropper(img, {
+      viewMode: 1,
+      dragMode: "move",
+      autoCropArea: 0.85,
+      background: false
+    });
   };
 
-  panel.querySelector("#saveCropped").onclick = () => {
+  panel.querySelector("#saveCropped").onclick = async () => {
     if(!state.cropper) return;
-    const dataUrl = state.cropper.getCroppedCanvas({ imageSmoothingQuality:'high' }).toDataURL('image/png', 1);
-    state.folders[folderIndex].questions.push({ type:"image", text:"", image:dataUrl, options:[] });
-    save();
+
+    const canvas = state.cropper.getCroppedCanvas({ imageSmoothingQuality: "high" });
+
+    const blob = await new Promise((resolve) => {
+      canvas.toBlob((b) => resolve(b), "image/png", 1);
+    });
+
+    if(!blob){
+      alert("خطا در ساخت تصویر.");
+      return;
+    }
+
+    const id = await saveImageBlob(blob);
+    state.folders[folderIndex].questions.push({ type:"image", text:"", imageId: id, options:[] });
+
+    saveDebounced();
     cleanupCrop(overlay);
-    openFolder(folderIndex);   // 🔑 نمایش فوری سوال جدید
+    openFolder(folderIndex);
   };
 
   const close = () => cleanupCrop(overlay);
   panel.querySelector("#cancelCrop").onclick = close;
-  panel.querySelector("#closeCrop").onclick = close;
-}
+  panel.querySelector('[data-close="1"]').onclick = close;
+};
 
-// Crop existing image
-function openCropExisting(folderIndex, idx, imageData){
-  const overlay = document.createElement("div"); overlay.className="modal-overlay active";
-  const panel = document.createElement("div"); panel.className="modal-panel glass-3d";
+function openCropExisting(folderIndex, idx, imageSrc, oldImageId){
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay active";
+
+  const panel = document.createElement("div");
+  panel.className = "modal-panel glass-3d";
+
   panel.innerHTML = `
-    <div class="modal-header"><h2>کراپ تصویر موجود</h2>
-      <button class="icon-btn" id="closeCrop"><span class="material-icons-outlined">close</span></button>
+    <div class="modal-header">
+      <h2>کراپ تصویر موجود</h2>
+      <button class="icon-btn" data-close="1"><span class="material-icons-outlined">close</span></button>
     </div>
     <div class="modal-body">
       <div id="cropArea" class="crop-area"></div>
@@ -445,263 +853,501 @@ function openCropExisting(folderIndex, idx, imageData){
         <button class="primary" id="saveCropped"><span class="material-icons-outlined">save</span></button>
         <button class="secondary" id="cancelCrop"><span class="material-icons-outlined">close</span></button>
       </div>
-    </div>`;
-  overlay.appendChild(panel); document.body.appendChild(overlay);
+    </div>
+  `;
 
-  const area = panel.querySelector("#cropArea"); area.innerHTML = "";
-  const img = document.createElement("img"); img.src = imageData; img.style.maxWidth = "100%"; area.appendChild(img);
-  state.cropper = new Cropper(img, { viewMode:1, dragMode:'move', autoCropArea:0.85, background:false });
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
 
-  panel.querySelector("#saveCropped").onclick = () => {
+  const area = panel.querySelector("#cropArea");
+  area.innerHTML = "";
+
+  const img = document.createElement("img");
+  img.src = imageSrc;
+  img.style.maxWidth = "100%";
+  area.appendChild(img);
+
+  state.cropper = new Cropper(img, {
+    viewMode: 1,
+    dragMode: "move",
+    autoCropArea: 0.85,
+    background: false
+  });
+
+  panel.querySelector("#saveCropped").onclick = async () => {
     if(!state.cropper) return;
-    const dataUrl = state.cropper.getCroppedCanvas({ imageSmoothingQuality:'high' }).toDataURL('image/png', 1);
-    state.folders[folderIndex].questions[idx].image = dataUrl;
-    save();
+
+    const canvas = state.cropper.getCroppedCanvas({ imageSmoothingQuality: "high" });
+
+    const blob = await new Promise((resolve) => {
+      canvas.toBlob((b) => resolve(b), "image/png", 1);
+    });
+
+    if(!blob){
+      alert("خطا در ساخت تصویر.");
+      return;
+    }
+
+    const newId = await saveImageBlob(blob);
+
+    // delete old
+    if(oldImageId){
+      try{ await deleteImageBlob(oldImageId); }catch{}
+    }
+
+    const q = state.folders[folderIndex].questions[idx];
+    q.imageId = newId;
+    delete q.image;
+
+    saveDebounced();
     cleanupCrop(overlay);
-    openFolder(folderIndex);   // 🔑 نمایش فوری تصویر ویرایش‌شده
+
+    // revoke temp object url if used
+    if(imageSrc.startsWith("blob:")){
+      try{ URL.revokeObjectURL(imageSrc); }catch{}
+    }
+
+    openFolder(folderIndex);
   };
 
-  const close = () => cleanupCrop(overlay);
+  const close = () => {
+    cleanupCrop(overlay);
+    if(imageSrc.startsWith("blob:")){
+      try{ URL.revokeObjectURL(imageSrc); }catch{}
+    }
+  };
+
   panel.querySelector("#cancelCrop").onclick = close;
-  panel.querySelector("#closeCrop").onclick = close;
+  panel.querySelector('[data-close="1"]').onclick = close;
 }
 
-// Cleanup cropper
 function cleanupCrop(overlay){
   document.body.removeChild(overlay);
-  if(state.cropper){ state.cropper.destroy(); state.cropper=null; }
-  if(state.pendingImageBlobUrl){ URL.revokeObjectURL(state.pendingImageBlobUrl); state.pendingImageBlobUrl=null; }
+  if(state.cropper){ state.cropper.destroy(); state.cropper = null; }
+  if(state.pendingImageBlobUrl){ URL.revokeObjectURL(state.pendingImageBlobUrl); state.pendingImageBlobUrl = null; }
 }
 
-
-// Build output DOM (respects alignment + empty text)
-function buildOutputDOM(folder){
+// ------------------------------
+// 11) Export PNG (renders a printable DOM)
+// ------------------------------
+async function buildOutputDOM(folder){
   const el = document.createElement("div");
   el.style.width = "794px";
   el.style.padding = "32px";
   el.style.background = "#fff";
   el.style.color = "#000";
+  el.style.fontFamily = "Vazirmatn, Vazir, sans-serif";
+  el.style.direction = "rtl";
 
-  const h = document.createElement("h2"); h.textContent = folder.name; el.appendChild(h);
+  const h = document.createElement("h2");
+  h.textContent = folder.name || "Arafiles";
+  h.style.textAlign = "center";
+  el.appendChild(h);
 
   const container = document.createElement("div");
-  container.className = (folder.perPage||6) > 5 ? "exam-page two-columns" : "exam-page one-column";
+  container.style.columnCount = "2";
+  container.style.columnGap = "18px";
+  container.style.columnFill = "auto";
 
-  (folder.questions||[]).forEach((q,idx)=>{
+  for(let idx=0; idx < (folder.questions||[]).length; idx++){
+    const q = folder.questions[idx];
+
     const box = document.createElement("div");
-    box.style.border = "1px solid #ddd"; box.style.borderRadius = "8px";
-    box.style.padding = "12px"; box.style.marginBottom = "12px"; box.style.pageBreakInside = "avoid";
+    box.style.display = "inline-block";
+    box.style.width = "100%";
+    box.style.border = "1px solid #ddd";
+    box.style.borderRadius = "10px";
+    box.style.padding = "12px";
+    box.style.marginBottom = "12px";
+    box.style.breakInside = "avoid";
 
     if(q.align==="center") box.style.textAlign="center";
     else if(q.align==="right") box.style.textAlign="right";
     else if(q.align==="left") box.style.textAlign="left";
 
-    const hasText = q.text && q.text.trim().length;
     const head = document.createElement("div");
-    head.textContent = hasText ? `${idx+1}. ${q.text}` : `${idx+1}.`;
+    head.textContent = (q.text && q.text.trim().length) ? `${idx+1}. ${q.text}` : `${idx+1}.`;
+    head.style.fontWeight = "800";
     head.style.textAlign = folder.numberAlign || "right";
     box.appendChild(head);
 
-    if(q.image){
+    // image
+    if(q.imageId){
+      const blob = await getImageBlob(q.imageId);
+      if(blob){
+        const dataUrl = await blobToDataURL(blob);
+        const img = document.createElement("img");
+        img.src = dataUrl;
+        img.style.maxWidth="100%";
+        img.style.maxHeight="240px";
+        img.style.objectFit="contain";
+        img.style.marginTop="10px";
+        img.style.borderRadius="10px";
+        box.appendChild(img);
+      }
+    } else if(q.image){
       const img = document.createElement("img");
-      img.style.maxWidth="100%"; img.style.maxHeight="220px"; img.style.objectFit="contain";
-      img.src = q.image; box.appendChild(img);
+      img.src = q.image;
+      img.style.maxWidth="100%";
+      img.style.maxHeight="240px";
+      img.style.objectFit="contain";
+      img.style.marginTop="10px";
+      img.style.borderRadius="10px";
+      box.appendChild(img);
     }
 
+    // options
     if(q.options && q.options.length){
-      const ul = document.createElement("ul"); ul.style.paddingLeft="0";
+      const ul = document.createElement("ul");
+      ul.style.padding = "0";
+      ul.style.margin = "8px 0 0";
       q.options.forEach((o,i)=>{
-        const li = document.createElement("li"); li.style.listStyle="none";
+        const li = document.createElement("li");
+        li.style.listStyle = "none";
+        li.style.margin = "4px 0";
+
         const labelSpan = document.createElement("span");
-        labelSpan.style.direction="ltr"; labelSpan.style.unicodeBidi="isolate";
-        labelSpan.style.marginInlineEnd="6px";
+        labelSpan.style.direction = "ltr";
+        labelSpan.style.unicodeBidi = "isolate";
+        labelSpan.style.marginInlineEnd = "6px";
         labelSpan.textContent = `(${String.fromCharCode(97+i)})`;
-        const textSpan = document.createElement("span"); textSpan.textContent = o;
-        li.appendChild(labelSpan); li.appendChild(textSpan);
+
+        const textSpan = document.createElement("span");
+        textSpan.textContent = o;
+
+        li.appendChild(labelSpan);
+        li.appendChild(textSpan);
         ul.appendChild(li);
       });
       box.appendChild(ul);
     }
 
-    const lines = document.createElement("div");
-    lines.style.height = "60px"; lines.style.borderTop = "1px dashed #bbb"; lines.style.marginTop = "8px";
-    box.appendChild(lines);
-
     container.appendChild(box);
-  });
+  }
 
   el.appendChild(container);
   return el;
 }
 
-// Export PDF
-
-
-
-async function exportPDF(folderIndex){
-  const folder = state.folders[folderIndex];
-  const { jsPDF } = window.jspdf;
-
-  const QUESTIONS_PER_PAGE = 6; // هر صفحه حداکثر 6 سؤال
-  const totalQuestions = folder.questions.length;
-  const totalPages = Math.ceil(totalQuestions / QUESTIONS_PER_PAGE);
-
-  const pageImages = [];
-
-  for (let page = 0; page < totalPages; page++) {
-    const start = page * QUESTIONS_PER_PAGE;
-    const end = Math.min(start + QUESTIONS_PER_PAGE, totalQuestions);
-    const slice = folder.questions.slice(start, end);
-
-    // ساختن DOM برای یک صفحه
-    const el = document.createElement("div");
-    el.style.width = "794px";   // عرض A4 تقریبی در px
-    el.style.height = "1123px"; // ارتفاع A4 تقریبی در px
-    el.style.padding = "20px";
-    el.style.background = "#fff";
-    el.style.fontFamily = "Vazir, sans-serif";
-    el.style.color = "#000";
-
-    // 👇 ستون‌بندی همیشه دو ستونه
-    el.style.display = "grid";
-    el.style.gridTemplateColumns = "1fr 1fr";
-    el.style.gap = "20px";
-
-    slice.forEach((q, i) => {
-      const block = document.createElement("div");
-      block.style.border = "1px solid #ccc";
-      block.style.borderRadius = "8px"; // گوشه‌های گرد
-      block.style.padding = "10px";
-      block.style.marginBottom = "20px";
-      block.style.breakInside = "avoid";
-      block.style.pageBreakInside = "avoid";
-
-      let html = `<div><strong>${start+i+1}. ${q.text}</strong></div>`;
-      if (q.options) {
-        html += q.options.map((opt, idx) => `<div>${String.fromCharCode(65+idx)}. ${opt}</div>`).join("");
-      }
-      if (q.image) {
-        html += `<img src="${q.image}" crossOrigin="anonymous" style="max-width:100%; margin-top:10px;">`;
-      }
-
-      block.innerHTML = html;
-      el.appendChild(block);
-    });
-
-    document.body.appendChild(el);
-
-    // گرفتن تصویر صفحه
-    const canvas = await html2canvas(el, {
-      scale: 2,
-      useCORS: true,
-      allowTaint: false,
-      backgroundColor: "#fff"
-    });
-
-    document.body.removeChild(el);
-
-    pageImages.push(canvas.toDataURL("image/jpeg", 0.95));
-  }
-
-  // ساخت PDF استاندارد A4
-  const doc = new jsPDF("p","mm","a4");
-  pageImages.forEach((img, i) => {
-    if (i > 0) doc.addPage();
-    doc.addImage(img, "JPEG", 0, 0, doc.internal.pageSize.getWidth(), doc.internal.pageSize.getHeight());
-  });
-
-  doc.save(`${folder.name}.pdf`);
-}
-
-
-
-
-
-
-
-
-
-
-
-
-// Export PNG
 async function exportPNG(folderIndex){
   const folder = state.folders[folderIndex];
-  const el = buildOutputDOM(folder);
+  const el = await buildOutputDOM(folder);
   document.body.appendChild(el);
-  const canvas = await html2canvas(el, { scale: 2 });
+
+  if (document.fonts && document.fonts.ready) await document.fonts.ready;
+
+  const canvas = await html2canvas(el, { scale: 3, backgroundColor:"#fff" });
   document.body.removeChild(el);
+
   const a = document.createElement("a");
   a.href = canvas.toDataURL("image/png");
   a.download = `${folder.name}.png`;
   a.click();
 }
 
-// Init
-setTheme(state.theme);
-applyBackground(state.background);
-renderHome();
+// ------------------------------
+// 12) Export PDF (two-column, Persian ok, no split)
+// ------------------------------
+async function exportPDF(folderIndex){
+  const folder = state.folders[folderIndex];
+  const { jsPDF } = window.jspdf;
 
-// Expose for inline handlers
-window.setTheme = setTheme;
-window.setBackgroundTile = setBackgroundTile;
-window.sendEmail = sendEmail;
-window.openResetConfirm = openResetConfirm;
-window.toResetStep2 = toResetStep2;
-window.closeReset = closeReset;
-window.doFullReset = doFullReset;
-window.closeSettings = closeSettings;
+  if (document.fonts && document.fonts.ready) await document.fonts.ready;
 
-window.addFolder = addFolder;
-window.deleteFolder = deleteFolder;
-window.editFolder = editFolder;
+  const PAGE_W = 794;
+  const PAGE_H = 1123;
+  const PADDING = 20;
 
-window.openFolder = openFolder;
-window.renderQuestions = renderQuestions;
-window.addTextQuestion = addTextQuestion;
-window.editQuestion = editQuestion;
-window.deleteQuestion = deleteQuestion;
+  const stage = document.createElement("div");
+  stage.style.position = "fixed";
+  stage.style.left = "-99999px";
+  stage.style.top = "0";
+  stage.style.width = PAGE_W + "px";
+  stage.style.height = PAGE_H + "px";
+  stage.style.padding = PADDING + "px";
+  stage.style.boxSizing = "border-box";
+  stage.style.background = "#fff";
+  stage.style.color = "#000";
+  stage.style.fontFamily = "Vazirmatn, Vazir, sans-serif";
+  stage.style.direction = "rtl";
+  stage.style.overflow = "hidden";
+  document.body.appendChild(stage);
 
-window.openCrop = openCrop;
-window.openCropExisting = openCropExisting;
+  const title = document.createElement("div");
+  title.style.fontWeight = "800";
+  title.style.fontSize = "18px";
+  title.style.marginBottom = "12px";
+  title.style.textAlign = "center";
+  title.textContent = folder.name || "Arafiles";
+  stage.appendChild(title);
 
-window.exportPDF = exportPDF;
-window.exportPNG = exportPNG;
+  const content = document.createElement("div");
+  content.style.height = (PAGE_H - (PADDING*2) - title.getBoundingClientRect().height - 12) + "px";
+  content.style.overflow = "hidden";
+  content.style.columnCount = "2";
+  content.style.columnGap = "18px";
+  content.style.columnFill = "auto";
+  stage.appendChild(content);
 
-function exportData(){
-  save(); // ذخیره آخرین state
-  const dataStr = JSON.stringify(state, null, 2);
-  const blob = new Blob([dataStr], { type: "application/json" });
+  const doc = new jsPDF("p","mm","a4");
+  const pageImages = [];
+
+  const makeBlock = async (q, number) => {
+    const block = document.createElement("div");
+    block.style.display = "inline-block";
+    block.style.width = "100%";
+    block.style.border = "1px solid #ccc";
+    block.style.borderRadius = "10px";
+    block.style.padding = "10px";
+    block.style.marginBottom = "12px";
+    block.style.breakInside = "avoid";
+    block.style.pageBreakInside = "avoid";
+    block.style.boxSizing = "border-box";
+
+    if (q.align === "center") block.style.textAlign = "center";
+    if (q.align === "left") block.style.textAlign = "left";
+    if (q.align === "right") block.style.textAlign = "right";
+
+    const head = document.createElement("div");
+    head.style.fontWeight = "800";
+    head.style.marginBottom = "8px";
+    head.style.textAlign = folder.numberAlign || "right";
+    head.textContent = (q.text && q.text.trim().length) ? `${number}. ${q.text}` : `${number}.`;
+    block.appendChild(head);
+
+    if(q.options && q.options.length){
+      const opts = document.createElement("div");
+      opts.style.display = "flex";
+      opts.style.flexDirection = "column";
+      opts.style.gap = "4px";
+      q.options.forEach((opt, i) => {
+        const row = document.createElement("div");
+        const label = String.fromCharCode(65 + i) + ". ";
+        row.innerHTML =
+          `<span style="direction:ltr;unicode-bidi:isolate;display:inline-block;min-width:22px;">${label}</span>` +
+          `<span>${escapeHtml(opt)}</span>`;
+        opts.appendChild(row);
+      });
+      block.appendChild(opts);
+    }
+
+    if(q.imageId){
+      const blob = await getImageBlob(q.imageId);
+      if(blob){
+        const dataUrl = await blobToDataURL(blob);
+        const img = document.createElement("img");
+        img.src = dataUrl;
+        img.style.maxWidth = "100%";
+        img.style.maxHeight = "220px";
+        img.style.objectFit = "contain";
+        img.style.marginTop = "10px";
+        img.style.borderRadius = "10px";
+        block.appendChild(img);
+      }
+    } else if(q.image){
+      const img = document.createElement("img");
+      img.src = q.image;
+      img.style.maxWidth = "100%";
+      img.style.maxHeight = "220px";
+      img.style.objectFit = "contain";
+      img.style.marginTop = "10px";
+      img.style.borderRadius = "10px";
+      block.appendChild(img);
+    }
+
+    return block;
+  };
+
+  const snapPage = async () => {
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const canvas = await html2canvas(stage, {
+      scale: 3,
+      backgroundColor: "#fff",
+      useCORS: true,
+      allowTaint: false
+    });
+    // PNG برای کیفیت بالا
+    pageImages.push(canvas.toDataURL("image/png"));
+  };
+
+  const overflows = () => content.scrollHeight > content.clientHeight;
+
+  content.innerHTML = "";
+  for(let i=0; i < (folder.questions||[]).length; i++){
+    const q = folder.questions[i];
+    const block = await makeBlock(q, i+1);
+    content.appendChild(block);
+
+    if(overflows()){
+      content.removeChild(block);
+      await snapPage();
+
+      content.innerHTML = "";
+      content.appendChild(block);
+
+      // اگر سؤال خیلی بزرگ باشد: بدون دست‌زدن به کیفیت تصویر، فقط کمی چیدمان را جمع می‌کنیم
+      if(overflows()){
+        block.style.fontSize = "12px";
+        block.style.lineHeight = "1.2";
+      }
+    }
+  }
+
+  if(content.children.length){
+    await snapPage();
+  }
+
+  pageImages.forEach((img, idx) => {
+    if(idx > 0) doc.addPage();
+    doc.addImage(img, "PNG", 0, 0, doc.internal.pageSize.getWidth(), doc.internal.pageSize.getHeight());
+  });
+
+  doc.save(`${folder.name}.pdf`);
+  document.body.removeChild(stage);
+}
+
+// ------------------------------
+// 13) Export/Import JSON (metadata + images)
+// ------------------------------
+// اینجا برای اینکه "هیچ مشکلی واسه نوع دیتا" پیش نیاد، export شامل تصاویر هم هست.
+// توجه: اگر خیلی تصویر سنگین باشد، فایل JSON خیلی بزرگ می‌شود.
+async function exportData(){
+  const payload = {
+    version: 2,
+    theme: state.theme,
+    background: state.background,
+    folders: JSON.parse(JSON.stringify(state.folders)),
+    images: {} // imageId -> dataURL
+  };
+
+  // جمع‌کردن همه imageId ها
+  const ids = new Set();
+  for(const f of payload.folders){
+    for(const q of (f.questions || [])){
+      if(q.imageId) ids.add(q.imageId);
+    }
+  }
+
+  // تبدیل blobها به dataURL (سنگین ولی مطمئن)
+  for(const id of ids){
+    const blob = await getImageBlob(id);
+    if(blob){
+      payload.images[id] = await blobToDataURL(blob);
+    }
+  }
+
+  const dataStr = JSON.stringify(payload, null, 2);
+  const blob = new Blob([dataStr], { type:"application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = "arafiles-data.json";
   a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  setTimeout(() => URL.revokeObjectURL(a.href), 1500);
 }
 
-function importData(file){
+async function importData(file){
   const reader = new FileReader();
-  reader.onload = e => {
-    try {
-      const newState = JSON.parse(e.target.result);
-      state = newState;
-      save();
-      renderHome(); // یا openFolder(...) اگر داخل فولدر هستی
+  reader.onload = async (e) => {
+    try{
+      const payload = JSON.parse(e.target.result);
+
+      // reset current
+      state.folders = [];
+      revokeAllObjectUrls();
+
+      // restore settings
+      if(payload.theme) setTheme(payload.theme);
+      if(payload.background) setBackground(payload.background);
+
+      // restore images first
+      const images = payload.images || {};
+      // images are dataURL; store as blobs with same id (keep keys)
+      if(Object.keys(images).length){
+        const db = await idbOpen();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(IDB_STORE, "readwrite");
+          const store = tx.objectStore(IDB_STORE);
+
+          const entries = Object.entries(images);
+          let pending = entries.length;
+          if(!pending){ resolve(); return; }
+
+          for(const [id, dataUrl] of entries){
+            fetch(dataUrl)
+              .then(r => r.blob())
+              .then(blob => {
+                const putReq = store.put({ id, blob, type: blob.type || "image/png", ts: Date.now() });
+                putReq.onsuccess = () => { if(--pending === 0) resolve(); };
+                putReq.onerror = () => reject(putReq.error);
+              })
+              .catch(reject);
+          }
+        });
+        db.close();
+      }
+
+      // restore folders
+      state.folders = payload.folders || [];
+      normalize();
+      saveDebounced();
+      renderHome();
       alert("داده‌ها با موفقیت بارگذاری شدند!");
-    } catch(err){
+    }catch(err){
+      console.error(err);
       alert("خطا در خواندن فایل JSON");
     }
   };
   reader.readAsText(file, "utf-8");
 }
 
-window.addEventListener("DOMContentLoaded", () => {
-  const btnSave = document.getElementById("btnSave");
-  const importInput = document.getElementById("importFile");
+// ------------------------------
+// 14) Wire UI events (no duplicates)
+// ------------------------------
+function initUI(){
+  // header
+  $("backBtn").onclick = () => renderHome();
+  $("settingsBtn").onclick = () => openSettings();
+  $("closeSettingsBtn").onclick = () => closeSettings();
 
-  if(btnSave) btnSave.onclick = exportData;
-  if(importInput) importInput.onchange = e => {
+  // floating
+  if(floatingAdd) floatingAdd.onclick = addFolder;
+
+  // settings actions
+  document.querySelectorAll("[data-theme]").forEach(btn => {
+    btn.onclick = () => setTheme(btn.getAttribute("data-theme"));
+  });
+
+  $("bgTiles").addEventListener("click", (e) => {
+    const tile = e.target.closest(".preview-tile");
+    if(!tile) return;
+    document.querySelectorAll(".preview-tile").forEach(t => t.classList.remove("active"));
+    tile.classList.add("active");
+    setBackground(tile.getAttribute("data-bg"));
+  });
+
+  $("importBtn").onclick = () => $("importFile").click();
+  $("importFile").onchange = (e) => {
     const file = e.target.files[0];
     if(file) importData(file);
+    e.target.value = "";
   };
-});
+
+  $("btnSave").onclick = () => exportData();
+
+  $("emailBtn").onclick = sendEmail;
+
+  $("resetBtn").onclick = openResetConfirm;
+  $("closeResetBtn").onclick = closeReset;
+  $("resetNo1").onclick = closeReset;
+  $("resetYes1").onclick = toResetStep2;
+  $("resetNo2").onclick = closeReset;
+  $("resetYes2").onclick = doFullReset;
+}
+
+// ------------------------------
+// 15) Init
+// ------------------------------
+setTheme(state.theme);
+applyBackground(state.background);
+initUI();
+renderHome();
