@@ -3,52 +3,65 @@
 <head>
   <meta charset="utf-8" />
 
-  <!-- iOS PWA + prevent zoom -->
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="theme-color" content="#0F172A" />
+  <!-- Single correct viewport (prevent zoom) -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0F172A">
+
+  <link rel="apple-touch-icon" href="icon-512.png">
+  <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="manifest" href="manifest.json" />
 
   <title>Arafiles</title>
 
-  <!-- Icons / Manifest -->
-  <link rel="manifest" href="manifest.json" />
-  <link rel="icon" type="image/png" href="favicon.png" />
-  <link rel="apple-touch-icon" href="icon-512.png" />
-
-  <!-- Styles -->
   <link rel="stylesheet" href="style.css" />
 
-  <!-- Fonts + Icons (will be runtime-cached by SW after first load) -->
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <!-- Fonts + Icons -->
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700&display=swap" rel="stylesheet" />
 
-  <!-- Libs (CDN) - will be runtime-cached by SW after first load -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" defer></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js" defer></script>
+  <!-- libs -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.css" />
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.js"></script>
+
+  <!-- ZIP -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
 
 <body class="dark">
+  <!-- Loading Overlay -->
+  <div id="loadingOverlay" class="loading-overlay active" aria-hidden="false">
+    <div class="loading-card glass-3d">
+      <div class="spinner"></div>
+      <div class="loading-title">Loading…</div>
+      <div id="loadingHint" class="loading-hint">در حال آماده‌سازی</div>
+    </div>
+  </div>
+
   <!-- Header -->
   <header class="app-header glass-3d">
     <h1 class="logo">Arafiles</h1>
+
     <div class="header-actions">
       <button id="backBtn" class="icon-btn" title="بازگشت">
         <span class="material-icons-outlined">arrow_back</span>
       </button>
+
       <button id="settingsBtn" class="icon-btn" title="تنظیمات">
         <span class="material-icons-outlined">settings</span>
       </button>
 
-      <button class="icon-btn" id="btnSave" title="خروجی JSON">
+      <!-- Export ZIP -->
+      <button class="icon-btn" id="btnSave" title="Backup ZIP">
         <span class="material-icons-outlined">save</span>
       </button>
 
-      <input type="file" id="importFile" accept="application/json,.json" style="display:none" />
+      <!-- Import ZIP/JSON -->
+      <input type="file" id="importFile" accept=".zip,.json,application/zip,application/json" hidden />
     </div>
   </header>
 
@@ -73,7 +86,7 @@
       <div class="modal-body">
         <div class="row">
           <label>حالت نمایش</label>
-          <div class="row-inline">
+          <div class="row-inline center">
             <button class="icon-btn" onclick="setTheme('dark')" title="شب">
               <span class="material-icons-outlined">dark_mode</span>
             </button>
@@ -83,9 +96,21 @@
           </div>
         </div>
 
+        <!-- Folder Glow toggle -->
+        <div class="row">
+          <label>Glow پوشه‌ها</label>
+          <div class="row-inline center">
+            <label class="toggle" title="Folder Glow">
+              <input id="folderGlowToggle" type="checkbox">
+              <span class="track"></span>
+              <span class="thumb"></span>
+            </label>
+          </div>
+        </div>
+
         <div class="row">
           <label>پس‌زمینه</label>
-          <div class="preview-row">
+          <div class="preview-row center">
             <div class="preview-tile" data-bg="gradient1" style="background: linear-gradient(120deg,#1f2937,#3b82f6);" onclick="setBackgroundTile(this)"></div>
             <div class="preview-tile" data-bg="gradient2" style="background: linear-gradient(120deg,#0ea5e9,#10b981);" onclick="setBackgroundTile(this)"></div>
             <div class="preview-tile" data-bg="glass" style="background: rgba(255,255,255,0.5); backdrop-filter: blur(8px);" onclick="setBackgroundTile(this)"></div>
@@ -97,23 +122,27 @@
         <hr/>
 
         <button class="primary" onclick="document.getElementById('importFile').click()">
-          <span class="material-icons-outlined">upload</span> بارگذاری داده‌ها
+          <span class="material-icons-outlined">upload</span> بارگذاری (ZIP/JSON)
         </button>
 
-        <div class="row" style="margin-top:10px;">
+        <div class="row" style="margin-top:12px;">
           <label>ارتباط با ما</label>
-          <button class="icon-btn" onclick="sendEmail()" title="ارسال ایمیل">
-            <span class="material-icons-outlined">email</span>
-          </button>
+          <div class="row-inline center">
+            <button class="icon-btn" onclick="sendEmail()" title="ارسال ایمیل">
+              <span class="material-icons-outlined">email</span>
+            </button>
+          </div>
         </div>
 
         <hr/>
 
         <div class="row">
           <label>ریست کامل اپلیکیشن</label>
-          <button class="danger" onclick="openResetConfirm()">
-            <span class="material-icons-outlined">delete_forever</span>
-          </button>
+          <div class="row-inline center">
+            <button class="danger" onclick="openResetConfirm()">
+              <span class="material-icons-outlined">delete_forever</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -131,16 +160,17 @@
       <div class="modal-body">
         <div id="resetStep1">
           <p>مطمئنی می‌خوای پاک بشه؟</p>
-          <div class="row-inline">
-            <button class="secondary" onclick="closeReset()">نه پشيمونم</button>
+          <div class="row-inline center">
+            <button class="secondary" onclick="closeReset()">نه</button>
             <button class="danger" onclick="toResetStep2()">بله</button>
           </div>
         </div>
+
         <div id="resetStep2" class="hidden">
           <p>واقعاً مطمئنی؟</p>
-          <div class="row-inline">
-            <button class="secondary" onclick="closeReset()">به جون مادرم دستم خورد</button>
-            <button class="danger" onclick="doFullReset()">بله مطمئنم</button>
+          <div class="row-inline center">
+            <button class="secondary" onclick="closeReset()">دستم خورد</button>
+            <button class="danger" onclick="doFullReset()">آره</button>
           </div>
         </div>
       </div>
@@ -148,16 +178,6 @@
   </div>
 
   <!-- App -->
-  <script src="app.js" defer></script>
-
-  <!-- Register SW (robust path for GitHub Pages subfolder) -->
-  <script>
-    (function(){
-      if (!('serviceWorker' in navigator)) return;
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(console.error);
-      });
-    })();
-  </script>
+  <script src="app.js"></script>
 </body>
 </html>
