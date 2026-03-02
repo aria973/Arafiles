@@ -10,29 +10,161 @@ function hideLoading(){
   if(ov) ov.classList.remove("active");
 }
 
-// =================== State ===================
+// Prevent iOS pinch zoom gestures (best-effort)
+document.addEventListener("gesturestart", (e) => e.preventDefault(), { passive:false });
+document.addEventListener("gesturechange", (e) => e.preventDefault(), { passive:false });
+document.addEventListener("gestureend", (e) => e.preventDefault(), { passive:false });
+
+// =================== IndexedDB Layer ===================
+const DB_NAME = "arafiles_db";
+const DB_VERSION = 1;
+const STORE_META = "meta";
+const STORE_IMAGES = "images";
+
+let db = null;
+let memImageUrlCache = new Map(); // imageId -> objectURL
+
+function openDB(){
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      if(!d.objectStoreNames.contains(STORE_META)) d.createObjectStore(STORE_META);
+      if(!d.objectStoreNames.contains(STORE_IMAGES)) d.createObjectStore(STORE_IMAGES);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbGet(store, key){
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, "readonly");
+    const st = tx.objectStore(store);
+    const req = st.get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function idbSet(store, key, val){
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, "readwrite");
+    const st = tx.objectStore(store);
+    const req = st.put(val, key);
+    req.onsuccess = () => resolve(true);
+    req.onerror = () => reject(req.error);
+  });
+}
+function idbDel(store, key){
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, "readwrite");
+    const st = tx.objectStore(store);
+    const req = st.delete(key);
+    req.onsuccess = () => resolve(true);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function uuid(){
+  if (crypto && crypto.randomUUID) return crypto.randomUUID();
+  return "img_" + Math.random().toString(16).slice(2) + "_" + Date.now();
+}
+
+async function putImageBlob(blob){
+  const id = uuid();
+  await idbSet(STORE_IMAGES, id, blob);
+  return id;
+}
+
+async function getImageUrl(imageId){
+  if(!imageId) return "";
+  if(memImageUrlCache.has(imageId)) return memImageUrlCache.get(imageId);
+
+  const blob = await idbGet(STORE_IMAGES, imageId);
+  if(!blob) return "";
+
+  const url = URL.createObjectURL(blob);
+  memImageUrlCache.set(imageId, url);
+  return url;
+}
+
+async function revokeAllImageUrls(){
+  for(const url of memImageUrlCache.values()) {
+    try{ URL.revokeObjectURL(url); }catch{}
+  }
+  memImageUrlCache.clear();
+}
+
+async function removeImage(imageId){
+  if(!imageId) return;
+  if(memImageUrlCache.has(imageId)){
+    try{ URL.revokeObjectURL(memImageUrlCache.get(imageId)); }catch{}
+    memImageUrlCache.delete(imageId);
+  }
+  await idbDel(STORE_IMAGES, imageId);
+}
+
+// =================== Legacy localStorage migration ===================
+function readLegacyFolders(){
+  try{
+    return JSON.parse(localStorage.getItem("folders") || "[]");
+  }catch{
+    return [];
+  }
+}
+
+// =================== State (kept in IDB meta['state']) ===================
 let state = {
   view: "home",
   currentFolderIndex: null,
-  folders: JSON.parse(localStorage.getItem("folders") || "[]"),
-  theme: localStorage.getItem("theme") || "dark",
-  background: localStorage.getItem("background") || "gradient1",
-  folderGlow: (localStorage.getItem("folderGlow") ?? "1") === "1",
+  folders: [],
+  theme: "dark",
+  background: "gradient1",
+  folderGlow: true,
   cropper: null,
   pendingImageBlobUrl: null
 };
 
-function save(){ localStorage.setItem("folders", JSON.stringify(state.folders)); }
+function defaultsForFolder(f){
+  if(!("color" in f)) f.color = "#3B82F6";
+  if(!("desc" in f)) f.desc = "";
+  if(!("questions" in f)) f.questions = [];
+  if(!("numberAlign" in f)) f.numberAlign = "right";
+  if(!("perPageMode" in f)) f.perPageMode = "auto";      // auto/manual
+  if(!("perPageManual" in f)) f.perPageManual = 6;
+  if(!("exportQuality" in f)) f.exportQuality = "hq";    // hq/compact
+  if(!("includeKey" in f)) f.includeKey = true;
+  if(!("pageNumbers" in f)) f.pageNumbers = false;
 
-// small debounce for save (reduce jank)
-let _saveTimer = null;
-function saveDebounced(){
-  if(_saveTimer) clearTimeout(_saveTimer);
-  _saveTimer = setTimeout(() => { save(); _saveTimer=null; }, 120);
+  // normalize questions
+  for(const q of (f.questions||[])){
+    if(!("text" in q)) q.text = "";
+    if(!("options" in q)) q.options = [];
+    if(!("align" in q)) q.align = "right";
+    if(!("answerText" in q)) q.answerText = "";
+    // image is stored as imageId in IDB
+    if("image" in q && !("imageId" in q)){
+      // older versions had q.image as dataURL — we keep for import migration elsewhere
+      // here we do nothing; migration handled on load/import
+    }
+  }
 }
 
-function applyFolderGlow(){
-  document.body.classList.toggle("no-folder-glow", !state.folderGlow);
+async function saveState(){
+  // store only lightweight state (folders/questions) — images are in STORE_IMAGES
+  await idbSet(STORE_META, "state", {
+    theme: state.theme,
+    background: state.background,
+    folderGlow: state.folderGlow,
+    folders: state.folders
+  });
+}
+
+// debounce saves
+let _saveTimer = null;
+function saveStateDebounced(){
+  if(_saveTimer) clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => { saveState().catch(()=>{}); _saveTimer=null; }, 150);
 }
 
 // =================== Service Worker ===================
@@ -40,14 +172,18 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("sw.js").catch(()=>{});
 }
 
-// =================== Theme + Background ===================
+// =================== Theme + Background + Glow ===================
 function setTheme(mode){
-  state.theme = mode; localStorage.setItem("theme", mode);
+  state.theme = mode;
   document.body.classList.remove("dark","light");
   document.body.classList.add(mode==="dark"?"dark":"light");
   applyBackground(state.background);
+  saveStateDebounced();
 }
-function setBackground(key){ state.background = key; localStorage.setItem("background", key); }
+function setBackground(key){
+  state.background = key;
+  saveStateDebounced();
+}
 function applyBackground(key){
   document.body.style.backgroundImage = "none";
   document.body.style.backgroundColor = "";
@@ -64,6 +200,9 @@ function applyBackground(key){
   } else {
     document.body.style.backgroundColor = getComputedStyle(document.body).getPropertyValue("--bg");
   }
+}
+function applyFolderGlow(){
+  document.body.classList.toggle("no-folder-glow", !state.folderGlow);
 }
 function setBackgroundTile(el){
   document.querySelectorAll(".preview-tile").forEach(t=>t.classList.remove("active"));
@@ -90,8 +229,16 @@ function toResetStep2(){
 function closeReset(){
   document.getElementById("resetOverlay").classList.remove("active");
 }
-function doFullReset(){
-  localStorage.clear();
+async function doFullReset(){
+  showLoading("Reset…");
+  await revokeAllImageUrls();
+
+  // delete all images
+  try{
+    const tx = db.transaction(STORE_IMAGES, "readwrite");
+    tx.objectStore(STORE_IMAGES).clear();
+  }catch{}
+
   state.folders = [];
   state.theme = "dark";
   state.background = "gradient1";
@@ -101,27 +248,30 @@ function doFullReset(){
   applyBackground("gradient1");
   applyFolderGlow();
 
+  await saveState().catch(()=>{});
+
   closeReset();
   closeSettings();
   renderHome();
+
+  hideLoading();
 }
 
 function sendEmail(){
   window.location.href = "mailto:Aria973@yahoo.com?subject=نقد یا پرسش درباره Arafiles";
 }
 
-// =================== Header controls ===================
+// =================== Header wiring ===================
 document.getElementById("backBtn").onclick = () => renderHome();
 document.getElementById("settingsBtn").onclick = () => {
   document.getElementById("settingsOverlay").classList.add("active");
-
   const tg = document.getElementById("folderGlowToggle");
   if(tg){
     tg.checked = state.folderGlow;
     tg.onchange = () => {
       state.folderGlow = tg.checked;
-      localStorage.setItem("folderGlow", state.folderGlow ? "1" : "0");
       applyFolderGlow();
+      saveStateDebounced();
     };
   }
 };
@@ -133,6 +283,14 @@ if (floatingAdd) floatingAdd.onclick = addFolder;
 function detectDirection(text){ return /[\u0600-\u06FF]/.test(text) ? "rtl" : "ltr"; }
 function escapeHtml(s){ return (s??"").toString().replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
+function clampInt(v, min, max){
+  const n = parseInt(v, 10);
+  if(Number.isNaN(n)) return min;
+  return Math.max(min, Math.min(max, n));
+}
+function sleepFrame(){
+  return new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+}
 
 // =================== Home ===================
 function renderHome(){
@@ -156,12 +314,7 @@ function renderHome(){
   grid.className = "grid";
 
   state.folders.forEach((f,i)=>{
-    // defaults for old folders
-    if(!("perPageMode" in f)) f.perPageMode = "auto";
-    if(!("perPageManual" in f)) f.perPageManual = f.perPage || 6;
-    if(!("exportQuality" in f)) f.exportQuality = "hq";
-    if(!("includeKey" in f)) f.includeKey = true;
-    if(!("pageNumbers" in f)) f.pageNumbers = false;
+    defaultsForFolder(f);
 
     const card = document.createElement("div");
     card.className = "glass-3d card folder-glow";
@@ -186,7 +339,7 @@ function renderHome(){
     grid.appendChild(card);
   });
 
-  app.appendChild(grid);
+  document.getElementById("app").appendChild(grid);
 }
 
 function addFolder(){
@@ -198,44 +351,35 @@ function addFolder(){
     name, desc,
     color:"#3B82F6",
     questions:[],
-    perPage:6,          // kept (legacy)
     numberAlign:"right",
-    perPageMode:"auto", // ✅ default auto
-    perPageManual:6,    // used when manual
-    exportQuality:"hq", // hq / compact
+    perPageMode:"auto",
+    perPageManual:6,
+    exportQuality:"hq",
     includeKey:true,
     pageNumbers:false
   });
 
-  save();
+  saveStateDebounced();
   renderHome();
 }
 
 function deleteFolder(i){
   if(!confirm("این پوشه حذف شود؟")) return;
   state.folders.splice(i,1);
-  save();
+  saveStateDebounced();
   renderHome();
 }
 
-// =================== Folder ===================
+// =================== Folder view ===================
 function openFolder(i){
   state.view = "folder";
   state.currentFolderIndex = i;
 
   const f = state.folders[i];
-
-  // defaults for old folders
-  if(!("perPageMode" in f)) f.perPageMode = "auto";
-  if(!("perPageManual" in f)) f.perPageManual = f.perPage || 6;
-  if(!("exportQuality" in f)) f.exportQuality = "hq";
-  if(!("includeKey" in f)) f.includeKey = true;
-  if(!("pageNumbers" in f)) f.pageNumbers = false;
-  if(!("numberAlign" in f)) f.numberAlign = "right";
+  defaultsForFolder(f);
 
   const app = document.getElementById("app");
   app.innerHTML = "";
-
   document.getElementById("floatingAdd").style.display = "none";
 
   const header = document.createElement("div");
@@ -250,16 +394,13 @@ function openFolder(i){
     </div>
 
     <div class="folder-controls">
-      <!-- Q/P auto/manual -->
       <div class="ctrl" title="Q/P Auto or Manual">
         <span class="lbl">Q/P</span>
-
         <label class="toggle" title="Auto / Manual">
           <input id="qpModeToggle" type="checkbox" ${f.perPageMode==="manual" ? "checked" : ""}>
           <span class="track"></span>
           <span class="thumb"></span>
         </label>
-
         <input id="perPageManual" type="number" min="2" max="50"
                value="${f.perPageManual || 6}"
                ${f.perPageMode==="manual" ? "" : "disabled"} />
@@ -302,12 +443,11 @@ function openFolder(i){
         <span class="material-icons-outlined">picture_as_pdf</span>
       </button>
 
-      <button class="icon-btn" id="exportPNG" title="PNG">
-        <span class="material-icons-outlined">image</span>
+      <button class="icon-btn" id="exportZIP" title="ZIP">
+        <span class="material-icons-outlined">archive</span>
       </button>
     </div>
   `;
-
   app.appendChild(header);
 
   const controls = document.createElement("div");
@@ -324,26 +464,23 @@ function openFolder(i){
   listWrap.id = "questions";
   app.appendChild(listWrap);
 
-  // wire
+  // wiring
   document.getElementById("editFolderBtn").onclick = () => editFolder(i);
   document.getElementById("exportPDF").onclick = () => exportPDF(i);
-  document.getElementById("exportPNG").onclick = () => exportPNG(i);
+  document.getElementById("exportZIP").onclick = () => exportZip();
 
   document.getElementById("addTextQ").onclick = () => addTextQuestion(i);
   document.getElementById("addImageQ").onclick = () => openCrop(i);
 
-  document.getElementById("numberAlign").onchange = e => { f.numberAlign = e.target.value; saveDebounced(); renderQuestions(i); };
+  document.getElementById("numberAlign").onchange = e => { f.numberAlign = e.target.value; saveStateDebounced(); renderQuestions(i); };
 
-  // Q/P toggle + input
   const qpToggle = document.getElementById("qpModeToggle");
   const qpInput  = document.getElementById("perPageManual");
-
   const syncQPUI = () => {
     const manual = (f.perPageMode === "manual");
     qpInput.disabled = !manual;
     qpInput.style.opacity = manual ? "1" : "0.55";
   };
-
   qpToggle.onchange = (e) => {
     f.perPageMode = e.target.checked ? "manual" : "auto";
     if (f.perPageMode === "manual") {
@@ -351,22 +488,20 @@ function openFolder(i){
       f.perPageManual = n;
       qpInput.value = n;
     }
-    saveDebounced();
+    saveStateDebounced();
     syncQPUI();
   };
-
   qpInput.onchange = (e) => {
     const n = clampInt(e.target.value || 6, 2, 50);
     f.perPageManual = n;
     e.target.value = n;
-    saveDebounced();
+    saveStateDebounced();
   };
-
   syncQPUI();
 
-  document.getElementById("toggleQuality").onchange = e => { f.exportQuality = e.target.checked ? "hq" : "compact"; saveDebounced(); };
-  document.getElementById("toggleKey").onchange = e => { f.includeKey = !!e.target.checked; saveDebounced(); };
-  document.getElementById("togglePageNum").onchange = e => { f.pageNumbers = !!e.target.checked; saveDebounced(); };
+  document.getElementById("toggleQuality").onchange = e => { f.exportQuality = e.target.checked ? "hq" : "compact"; saveStateDebounced(); };
+  document.getElementById("toggleKey").onchange = e => { f.includeKey = !!e.target.checked; saveStateDebounced(); };
+  document.getElementById("togglePageNum").onchange = e => { f.pageNumbers = !!e.target.checked; saveStateDebounced(); };
 
   renderQuestions(i);
 }
@@ -374,6 +509,7 @@ function openFolder(i){
 // =================== Folder edit modal ===================
 function editFolder(i){
   const f = state.folders[i];
+  defaultsForFolder(f);
 
   const overlay = document.createElement("div");
   overlay.className="modal-overlay active";
@@ -400,16 +536,18 @@ function editFolder(i){
     f.name = document.getElementById("folderName").value || "Folder";
     f.desc = document.getElementById("folderDesc").value || "";
     f.color = document.getElementById("folderColor").value || "#3B82F6";
-    save();
+    saveStateDebounced();
     document.body.removeChild(overlay);
     openFolder(i);
   };
   panel.querySelector("#closeFolderSettings").onclick = () => document.body.removeChild(overlay);
 }
 
-// =================== Questions ===================
-function renderQuestions(folderIndex){
+// =================== Questions render ===================
+async function renderQuestions(folderIndex){
   const f = state.folders[folderIndex];
+  defaultsForFolder(f);
+
   const wrap = document.getElementById("questions");
   wrap.innerHTML = "";
 
@@ -423,8 +561,8 @@ function renderQuestions(folderIndex){
 
   wrap.ondragover = (e) => e.preventDefault();
 
-  f.questions.forEach((q, idx) => {
-    // normalize
+  for(let idx=0; idx<f.questions.length; idx++){
+    const q = f.questions[idx];
     if(!("options" in q)) q.options = [];
     if(!("answerText" in q)) q.answerText = "";
 
@@ -465,10 +603,10 @@ function renderQuestions(folderIndex){
     alignBtn.innerHTML=`<span class="material-icons-outlined">format_align_center</span>`;
     alignBtn.onclick=()=>{
       q.align = q.align==="center" ? "right" : q.align==="right" ? "left" : "center";
-      saveDebounced(); renderQuestions(folderIndex);
+      saveStateDebounced();
+      renderQuestions(folderIndex);
     };
 
-    // ✅ Answer text only
     const ansBtn = document.createElement("button");
     ansBtn.className = "mini" + ((q.answerText && q.answerText.trim()) ? " ok" : "");
     ansBtn.title = "Answer (متنی)";
@@ -478,7 +616,7 @@ function renderQuestions(folderIndex){
       const val = prompt("جواب متنی سوال:", cur);
       if(val === null) return;
       q.answerText = (val || "").trim();
-      saveDebounced();
+      saveStateDebounced();
       renderQuestions(folderIndex);
     };
 
@@ -490,13 +628,18 @@ function renderQuestions(folderIndex){
     top.appendChild(actions);
     card.appendChild(top);
 
-    if(q.image){
+    // image
+    if(q.imageId){
       const img = document.createElement("img");
       img.className="question-img";
-      img.src = q.image;
+      img.alt = "image";
       card.appendChild(img);
+
+      // async load blob -> objectURL
+      getImageUrl(q.imageId).then(url => { if(url) img.src = url; });
     }
 
+    // options (if user uses)
     if(q.options && q.options.length){
       const ul = document.createElement("ul");
       ul.className="options";
@@ -529,19 +672,19 @@ function renderQuestions(folderIndex){
       const arr = f.questions;
       const moved = arr.splice(from,1)[0];
       arr.splice(to,0,moved);
-      saveDebounced();
+      saveStateDebounced();
       renderQuestions(folderIndex);
     });
 
     wrap.appendChild(card);
-  });
+  }
 }
 
 function addTextQuestion(folderIndex){
   const text = prompt("متن سوال (می‌تواند خالی باشد):") || "";
-  const q = { type:"text", text, options:[], answerText:"" };
+  const q = { type:"text", text, options:[], answerText:"", align:"right" };
   state.folders[folderIndex].questions.push(q);
-  save();
+  saveStateDebounced();
   renderQuestions(folderIndex);
   openOptionsEditor(folderIndex, state.folders[folderIndex].questions.length-1);
 }
@@ -588,18 +731,17 @@ function openOptionsEditor(folderIndex, idx){
         <input value="${escapeAttr(o||"")}" data-idx="${i}" style="flex:1;" />
         <button class="icon-btn danger" data-del="${i}"><span class="material-icons-outlined">close</span></button>
       `;
-
       wrap.appendChild(row);
     });
 
     wrap.querySelectorAll("input[data-idx]").forEach(inp=>{
-      inp.oninput = e => { q.options[+e.target.dataset.idx] = e.target.value; saveDebounced(); };
+      inp.oninput = e => { q.options[+e.target.dataset.idx] = e.target.value; saveStateDebounced(); };
     });
     wrap.querySelectorAll("[data-del]").forEach(btn=>{
       btn.onclick = e => {
         const di = +e.currentTarget.dataset.del;
         q.options.splice(di,1);
-        saveDebounced();
+        saveStateDebounced();
         renderOpts();
         renderQuestions(folderIndex);
       };
@@ -608,7 +750,7 @@ function openOptionsEditor(folderIndex, idx){
 
   renderOpts();
 
-  panel.querySelector("#addOpt").onclick = () => { q.options.push(""); saveDebounced(); renderOpts(); renderQuestions(folderIndex); };
+  panel.querySelector("#addOpt").onclick = () => { q.options.push(""); saveStateDebounced(); renderOpts(); renderQuestions(folderIndex); };
   const close = () => { document.body.removeChild(overlay); };
   panel.querySelector("#doneOpt").onclick = close;
   panel.querySelector("#closeOpt").onclick = close;
@@ -644,7 +786,7 @@ function editQuestion(folderIndex, idx){
   panel.querySelector("#editText").onclick = () => {
     const nt = prompt("ویرایش متن سوال:", q.text || "");
     if (nt !== null) q.text = nt;
-    saveDebounced();
+    saveStateDebounced();
     renderQuestions(folderIndex);
   };
 
@@ -654,35 +796,45 @@ function editQuestion(folderIndex, idx){
     const input = document.createElement("input");
     input.type="file";
     input.accept="image/*";
-    input.onchange = e => {
+    input.onchange = async (e) => {
       const file = e.target.files[0];
       if(!file) return;
-      const rdr = new FileReader();
-      rdr.onload = () => {
-        q.image = rdr.result;
-        saveDebounced();
-        renderQuestions(folderIndex);
-      };
-      rdr.readAsDataURL(file);
+      showLoading("در حال ذخیره تصویر…");
+      await sleepFrame();
+
+      const blob = file;
+      const newId = await putImageBlob(blob);
+
+      // delete old if existed
+      if(q.imageId) await removeImage(q.imageId);
+
+      q.imageId = newId;
+      saveStateDebounced();
+      hideLoading();
+
+      renderQuestions(folderIndex);
     };
     input.click();
   };
 
   panel.querySelector("#cropImage").onclick = () => {
-    if(!q.image){ alert("هیچ تصویری برای کراپ وجود ندارد."); return; }
-    openCropExisting(folderIndex, idx, q.image);
+    if(!q.imageId){ alert("هیچ تصویری برای کراپ وجود ندارد."); return; }
+    openCropExisting(folderIndex, idx, q.imageId);
   };
 
   panel.querySelector("#closeEditQ").onclick = () => document.body.removeChild(overlay);
 }
 
-function deleteQuestion(folderIndex, idx){
+async function deleteQuestion(folderIndex, idx){
+  const q = state.folders[folderIndex].questions[idx];
+  if(q?.imageId) await removeImage(q.imageId);
+
   state.folders[folderIndex].questions.splice(idx, 1);
-  saveDebounced();
+  saveStateDebounced();
   renderQuestions(folderIndex);
 }
 
-// =================== Cropper ===================
+// =================== Cropper (stores blob in IDB) ===================
 function openCrop(folderIndex){
   const overlay = document.createElement("div");
   overlay.className="modal-overlay active";
@@ -725,12 +877,29 @@ function openCrop(folderIndex){
     state.cropper = new Cropper(img, { viewMode:1, dragMode:'move', autoCropArea:0.85, background:false });
   };
 
-  panel.querySelector("#saveCropped").onclick = () => {
+  panel.querySelector("#saveCropped").onclick = async () => {
     if(!state.cropper) return;
-    const dataUrl = state.cropper.getCroppedCanvas({ imageSmoothingQuality:'high' }).toDataURL('image/png', 1);
-    state.folders[folderIndex].questions.push({ type:"image", text:"", image:dataUrl, options:[], answerText:"" });
-    save();
+
+    showLoading("در حال ذخیره تصویر…");
+    await sleepFrame();
+
+    const canvas = state.cropper.getCroppedCanvas({ imageSmoothingQuality:'high' });
+    const blob = await new Promise(res => canvas.toBlob(res, "image/png", 1));
+
+    const imageId = await putImageBlob(blob);
+
+    state.folders[folderIndex].questions.push({
+      type:"image",
+      text:"",
+      options:[],
+      answerText:"",
+      align:"right",
+      imageId
+    });
+
+    saveStateDebounced();
     cleanupCrop(overlay);
+    hideLoading();
     openFolder(folderIndex);
   };
 
@@ -739,7 +908,7 @@ function openCrop(folderIndex){
   panel.querySelector("#closeCrop").onclick = close;
 }
 
-function openCropExisting(folderIndex, idx, imageData){
+async function openCropExisting(folderIndex, idx, imageId){
   const overlay = document.createElement("div");
   overlay.className="modal-overlay active";
 
@@ -765,19 +934,36 @@ function openCropExisting(folderIndex, idx, imageData){
   const area = panel.querySelector("#cropArea");
   area.innerHTML = "";
 
+  showLoading("Loading image…");
+  await sleepFrame();
+  const url = await getImageUrl(imageId);
+  hideLoading();
+
   const img = document.createElement("img");
-  img.src = imageData;
+  img.src = url;
   img.style.maxWidth = "100%";
   area.appendChild(img);
 
   state.cropper = new Cropper(img, { viewMode:1, dragMode:'move', autoCropArea:0.85, background:false });
 
-  panel.querySelector("#saveCropped").onclick = () => {
+  panel.querySelector("#saveCropped").onclick = async () => {
     if(!state.cropper) return;
-    const dataUrl = state.cropper.getCroppedCanvas({ imageSmoothingQuality:'high' }).toDataURL('image/png', 1);
-    state.folders[folderIndex].questions[idx].image = dataUrl;
-    saveDebounced();
+
+    showLoading("در حال ذخیره تصویر…");
+    await sleepFrame();
+
+    const canvas = state.cropper.getCroppedCanvas({ imageSmoothingQuality:'high' });
+    const blob = await new Promise(res => canvas.toBlob(res, "image/png", 1));
+    const newId = await putImageBlob(blob);
+
+    // delete old
+    await removeImage(imageId);
+
+    state.folders[folderIndex].questions[idx].imageId = newId;
+    saveStateDebounced();
+
     cleanupCrop(overlay);
+    hideLoading();
     openFolder(folderIndex);
   };
 
@@ -792,79 +978,18 @@ function cleanupCrop(overlay){
   if(state.pendingImageBlobUrl){ URL.revokeObjectURL(state.pendingImageBlobUrl); state.pendingImageBlobUrl=null; }
 }
 
-// =================== Export PNG ===================
-function buildOutputDOM(folder){
-  const el = document.createElement("div");
-  el.style.width = "794px";
-  el.style.padding = "32px";
-  el.style.background = "#fff";
-  el.style.color = "#000";
-  el.style.fontFamily = "Vazirmatn, sans-serif";
-  el.style.direction = "rtl";
-
-  const h = document.createElement("h2");
-  h.textContent = folder.name;
-  h.style.textAlign = "center";
-  el.appendChild(h);
-
-  (folder.questions||[]).forEach((q,idx)=>{
-    const box = document.createElement("div");
-    box.style.border = "1px solid #ddd";
-    box.style.borderRadius = "8px";
-    box.style.padding = "12px";
-    box.style.marginBottom = "12px";
-    box.style.pageBreakInside = "avoid";
-
-    const head = document.createElement("div");
-    head.textContent = (q.text && q.text.trim().length) ? `${idx+1}. ${q.text}` : `${idx+1}.`;
-    head.style.fontWeight = "800";
-    head.style.textAlign = folder.numberAlign || "right";
-    box.appendChild(head);
-
-    if(q.image){
-      const img = document.createElement("img");
-      img.style.maxWidth="100%";
-      img.style.maxHeight="220px";
-      img.style.objectFit="contain";
-      img.src = q.image;
-      box.appendChild(img);
-    }
-
-    el.appendChild(box);
-  });
-
-  return el;
-}
-
-async function exportPNG(folderIndex){
-  const folder = state.folders[folderIndex];
-  showLoading("در حال خروجی PNG…");
-  await new Promise(r => requestAnimationFrame(r));
-
-  const el = buildOutputDOM(folder);
-  document.body.appendChild(el);
-  const canvas = await html2canvas(el, { scale: 2, backgroundColor:"#fff" });
-  document.body.removeChild(el);
-
-  const a = document.createElement("a");
-  a.href = canvas.toDataURL("image/png");
-  a.download = `${folder.name}.png`;
-  a.click();
-
-  hideLoading();
-}
-
-// =================== Export PDF (two columns + auto/manual Q/P + answer key text) ===================
+// =================== PDF Export (2 columns, auto/manual Q/P, answer key, page numbers) ===================
 async function exportPDF(folderIndex){
   const folder = state.folders[folderIndex];
+  defaultsForFolder(folder);
+
   const { jsPDF } = window.jspdf;
 
   showLoading("در حال ساخت PDF…");
-  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  await sleepFrame();
 
-  // quality
   const quality = folder.exportQuality === "hq" ? "hq" : "compact";
-  const scale = (quality === "hq") ? 2.5 : 2.0;
+  const scale = (quality === "hq") ? 2.3 : 1.9;
   const jpegQ = (quality === "hq") ? 0.90 : 0.82;
 
   const PAGE_W = 794;
@@ -872,11 +997,10 @@ async function exportPDF(folderIndex){
   const PADDING = 20;
   const GAP = 18;
 
-  // perPage mode
   const manualMode = folder.perPageMode === "manual";
   const manualLimit = clampInt(folder.perPageManual || 6, 2, 50);
 
-  // stage (offscreen)
+  // Stage (offscreen)
   const stage = document.createElement("div");
   stage.style.position = "fixed";
   stage.style.left = "-99999px";
@@ -934,7 +1058,6 @@ async function exportPDF(folderIndex){
   colsWrap.appendChild(col2);
   stage.appendChild(colsWrap);
 
-  const pages = [];
   const qs = folder.questions || [];
 
   const waitImages = async (root) => {
@@ -943,10 +1066,10 @@ async function exportPDF(folderIndex){
       if (img.complete) return Promise.resolve();
       return new Promise(res => { img.onload = img.onerror = () => res(); });
     }));
-    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    await sleepFrame();
   };
 
-  const makeBlock = (q, number) => {
+  const makeBlock = async (q, number) => {
     const block = document.createElement("div");
     block.style.border = "1px solid #ccc";
     block.style.borderRadius = "10px";
@@ -981,14 +1104,18 @@ async function exportPDF(folderIndex){
       block.appendChild(opts);
     }
 
-    if(q.image){
+    if(q.imageId){
       const img = document.createElement("img");
-      img.src = q.image;
       img.style.maxWidth = "100%";
       img.style.maxHeight = "220px";
       img.style.objectFit = "contain";
       img.style.marginTop = "10px";
       img.style.borderRadius = "10px";
+
+      // ensure objectURL is ready
+      const url = await getImageUrl(q.imageId);
+      if(url) img.src = url;
+
       block.appendChild(img);
     }
 
@@ -998,8 +1125,8 @@ async function exportPDF(folderIndex){
   const clearCols = () => { col1.innerHTML = ""; col2.innerHTML = ""; };
   const fits = (col) => col.scrollHeight <= col.clientHeight;
 
-  const layoutPages = [];
-  const pushLayout = () => layoutPages.push({ col1: col1.innerHTML, col2: col2.innerHTML });
+  const layouts = [];
+  const pushLayout = () => layouts.push({ col1: col1.innerHTML, col2: col2.innerHTML });
 
   let currentCol = col1;
   let countOnPage = 0;
@@ -1011,19 +1138,18 @@ async function exportPDF(folderIndex){
     countOnPage = 0;
   };
 
-  // layout questions
-  for(let i=0; i<qs.length; i++){
+  // Layout questions
+  for(let i=0;i<qs.length;i++){
     const q = qs[i];
     if(!("options" in q)) q.options = [];
     if(!("answerText" in q)) q.answerText = "";
+    if(!("align" in q)) q.align = "right";
 
-    // ✅ manual per-page limit
     if(manualMode && countOnPage >= manualLimit){
       newPage();
     }
 
-    const block = makeBlock(q, i+1);
-
+    const block = await makeBlock(q, i+1);
     currentCol.appendChild(block);
     await waitImages(block);
 
@@ -1043,17 +1169,14 @@ async function exportPDF(folderIndex){
           await waitImages(block);
 
           if(!fits(currentCol)){
-            // extremely long block fallback
             block.style.fontSize = "12px";
             block.style.lineHeight = "1.2";
           }
         }
-      } else {
+      }else{
         newPage();
-
         currentCol.appendChild(block);
         await waitImages(block);
-
         if(!fits(currentCol)){
           block.style.fontSize = "12px";
           block.style.lineHeight = "1.2";
@@ -1068,39 +1191,37 @@ async function exportPDF(folderIndex){
     pushLayout();
   }
 
+  const pages = [];
   const shouldKey = !!folder.includeKey;
-  const totalPages = layoutPages.length + (shouldKey ? 1 : 0);
+  const totalPages = layouts.length + (shouldKey ? 1 : 0);
 
-  // snapshot function
   const snapPage = async (pageIndex) => {
     footer.textContent = folder.pageNumbers ? String(pageIndex) : "";
-    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-
+    await sleepFrame();
     const canvas = await html2canvas(stage, {
       scale,
       backgroundColor: "#fff",
       useCORS: true,
       allowTaint: false
     });
-
     pages.push(canvas.toDataURL("image/jpeg", jpegQ));
   };
 
   // snap question pages
-  for(let p=0; p<layoutPages.length; p++){
+  for(let p=0;p<layouts.length;p++){
     title.textContent = folder.name || "Arafiles";
     colsWrap.style.display = "flex";
     colsWrap.innerHTML = "";
     colsWrap.appendChild(col1);
     colsWrap.appendChild(col2);
 
-    col1.innerHTML = layoutPages[p].col1;
-    col2.innerHTML = layoutPages[p].col2;
+    col1.innerHTML = layouts[p].col1;
+    col2.innerHTML = layouts[p].col2;
 
     await snapPage(p+1);
   }
 
-  // answer key page (text answers)
+  // Answer key page (text answers)
   if(shouldKey){
     title.textContent = `${folder.name || "Arafiles"} — Answer Key`;
 
@@ -1134,7 +1255,6 @@ async function exportPDF(folderIndex){
     await snapPage(totalPages);
   }
 
-  // build PDF
   const doc = new jsPDF("p","mm","a4");
   pages.forEach((img, idx) => {
     if(idx > 0) doc.addPage();
@@ -1147,10 +1267,10 @@ async function exportPDF(folderIndex){
   hideLoading();
 }
 
-// =================== ZIP Export/Import ===================
-function makeExportPayload(){
+// =================== ZIP Export/Import (single file) ===================
+function makeBackupJson(){
   return {
-    schema: "arafiles_backup_v1",
+    schema: "arafiles_backup_v2",
     exportedAt: new Date().toISOString(),
     data: {
       theme: state.theme,
@@ -1161,18 +1281,59 @@ function makeExportPayload(){
   };
 }
 
+async function dataUrlToBlob(dataUrl){
+  const res = await fetch(dataUrl);
+  return await res.blob();
+}
+
 async function exportZip(){
-  showLoading("در حال ساخت فایل ZIP…");
-  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  showLoading("در حال ساخت ZIP…");
+  await sleepFrame();
 
-  save(); // latest
-  const payload = makeExportPayload();
-  const json = JSON.stringify(payload, null, 2);
+  await saveState().catch(()=>{});
 
+  // Build zip:
+  // - data.json (folders/questions with imageId references)
+  // - images/<imageId>.(png/jpg) blob
   const zip = new JSZip();
-  zip.file("arafiles-data.json", json);
 
-  const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+  const json = makeBackupJson();
+  zip.file("data.json", JSON.stringify(json, null, 2));
+
+  const imgFolder = zip.folder("images");
+
+  // Collect unique imageIds
+  const ids = new Set();
+  for(const f of state.folders){
+    for(const q of (f.questions||[])){
+      if(q.imageId) ids.add(q.imageId);
+      // legacy dataURL (should not exist in current saves, but handle just in case)
+      if(q.image && !q.imageId){
+        // convert and store as new imageId during export (non-destructive)
+        try{
+          const blob = await dataUrlToBlob(q.image);
+          const newId = await putImageBlob(blob);
+          q.imageId = newId;
+          delete q.image;
+          ids.add(newId);
+        }catch{}
+      }
+    }
+  }
+
+  // Save state if we migrated any legacy images
+  await saveState().catch(()=>{});
+
+  for(const id of ids){
+    const blob = await idbGet(STORE_IMAGES, id);
+    if(blob){
+      // try keep extension
+      const ext = blob.type === "image/jpeg" ? "jpg" : "png";
+      imgFolder.file(`${id}.${ext}`, blob);
+    }
+  }
+
+  const blob = await zip.generateAsync({ type:"blob", compression:"DEFLATE", compressionOptions:{ level: 6 } });
 
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -1185,8 +1346,8 @@ async function exportZip(){
 }
 
 async function importAny(file){
-  showLoading("در حال بارگذاری داده‌ها…");
-  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  showLoading("در حال بارگذاری…");
+  await sleepFrame();
 
   const name = (file.name || "").toLowerCase();
 
@@ -1195,67 +1356,162 @@ async function importAny(file){
       const ab = await file.arrayBuffer();
       const zip = await JSZip.loadAsync(ab);
 
-      // find json inside
-      const jsonFileName =
-        Object.keys(zip.files).find(k => k.toLowerCase().endsWith(".json")) ||
-        "arafiles-data.json";
+      // data.json
+      const dataFile = zip.file("data.json") || zip.file("arafiles-data.json") || zip.file(Object.keys(zip.files).find(k => k.toLowerCase().endsWith(".json")));
+      if(!dataFile) throw new Error("No JSON inside ZIP");
 
-      const jsonText = await zip.file(jsonFileName).async("string");
-      await importFromJsonText(jsonText);
-    } else {
-      const text = await file.text();
-      await importFromJsonText(text);
+      const jsonText = await dataFile.async("string");
+      const payload = JSON.parse((jsonText||"").replace(/^\uFEFF/, "").trim());
+      const data = payload?.data ? payload.data : payload;
+
+      // load images folder
+      const imagesEntries = Object.keys(zip.files).filter(k => k.startsWith("images/") && !zip.files[k].dir);
+
+      // wipe current images and urls
+      await revokeAllImageUrls();
+      try{
+        const tx = db.transaction(STORE_IMAGES, "readwrite");
+        tx.objectStore(STORE_IMAGES).clear();
+      }catch{}
+
+      // write images to IDB
+      for(const path of imagesEntries){
+        const fileObj = zip.file(path);
+        if(!fileObj) continue;
+        const blob = await fileObj.async("blob");
+
+        // name = images/<id>.<ext>
+        const base = path.split("/").pop();
+        const id = base.split(".")[0];
+        await idbSet(STORE_IMAGES, id, blob);
+      }
+
+      // set state
+      state.theme = data.theme || state.theme;
+      state.background = data.background || state.background;
+      state.folderGlow = (typeof data.folderGlow === "boolean") ? data.folderGlow : state.folderGlow;
+      state.folders = Array.isArray(data.folders) ? data.folders : [];
+
+      // normalize
+      for(const f of state.folders) defaultsForFolder(f);
+
+      setTheme(state.theme);
+      applyBackground(state.background);
+      applyFolderGlow();
+
+      await saveState();
+
+      renderHome();
+      hideLoading();
+      alert("داده‌ها با موفقیت بارگذاری شدند!");
+      return;
     }
+
+    // JSON import (legacy)
+    const text = await file.text();
+    const payload = JSON.parse((text||"").replace(/^\uFEFF/, "").trim());
+    const data = payload?.data ? payload.data : payload;
+
+    state.theme = data.theme || state.theme;
+    state.background = data.background || state.background;
+    state.folderGlow = (typeof data.folderGlow === "boolean") ? data.folderGlow : state.folderGlow;
+    state.folders = Array.isArray(data.folders) ? data.folders : [];
+
+    // migrate any base64 images into IDB blobs
+    await revokeAllImageUrls();
+    for(const f of state.folders){
+      defaultsForFolder(f);
+      for(const q of (f.questions||[])){
+        if(q.image && !q.imageId){
+          try{
+            const blob = await dataUrlToBlob(q.image);
+            const id = await putImageBlob(blob);
+            q.imageId = id;
+            delete q.image;
+          }catch{}
+        }
+      }
+    }
+
+    setTheme(state.theme);
+    applyBackground(state.background);
+    applyFolderGlow();
+
+    await saveState();
+    renderHome();
 
     hideLoading();
     alert("داده‌ها با موفقیت بارگذاری شدند!");
-  } catch(err){
+
+  }catch(err){
     console.error(err);
     hideLoading();
     alert("خطا در بارگذاری فایل (ZIP/JSON)");
   }
 }
 
-async function importFromJsonText(text){
-  const cleaned = (text || "").replace(/^\uFEFF/, "").trim();
-  const payload = JSON.parse(cleaned);
-
-  // accept both old and new formats
-  const data = payload?.data ? payload.data : payload;
-
-  if(data.theme) setTheme(data.theme);
-  if(data.background){ state.background = data.background; applyBackground(state.background); localStorage.setItem("background", state.background); }
-  if(typeof data.folderGlow === "boolean"){
-    state.folderGlow = data.folderGlow;
-    localStorage.setItem("folderGlow", state.folderGlow ? "1" : "0");
-    applyFolderGlow();
-  }
-  if(Array.isArray(data.folders)){
-    state.folders = data.folders;
-    save();
-  }
-
-  renderHome();
-}
-
-// =================== Helpers ===================
-function clampInt(v, min, max){
-  const n = parseInt(v, 10);
-  if(Number.isNaN(n)) return min;
-  return Math.max(min, Math.min(max, n));
-}
-
 // =================== Init ===================
-(async function init(){
+async function init(){
   showLoading("در حال آماده‌سازی…");
 
-  // theme/bg/glow
+  try{
+    db = await openDB();
+  }catch(err){
+    console.error("IndexedDB failed:", err);
+    // Fallback: still load UI with legacy localStorage
+    state.folders = readLegacyFolders();
+    state.theme = localStorage.getItem("theme") || "dark";
+    state.background = localStorage.getItem("background") || "gradient1";
+    state.folderGlow = (localStorage.getItem("folderGlow") ?? "1") === "1";
+
+    setTheme(state.theme);
+    applyBackground(state.background);
+    applyFolderGlow();
+
+    renderHome();
+    hideLoading();
+    return;
+  }
+
+  // Load from IDB
+  const saved = await idbGet(STORE_META, "state");
+  if(saved){
+    state.theme = saved.theme || "dark";
+    state.background = saved.background || "gradient1";
+    state.folderGlow = (typeof saved.folderGlow === "boolean") ? saved.folderGlow : true;
+    state.folders = Array.isArray(saved.folders) ? saved.folders : [];
+  } else {
+    // migrate from legacy localStorage once
+    const legacyFolders = readLegacyFolders();
+    state.folders = legacyFolders;
+
+    state.theme = localStorage.getItem("theme") || "dark";
+    state.background = localStorage.getItem("background") || "gradient1";
+    state.folderGlow = (localStorage.getItem("folderGlow") ?? "1") === "1";
+
+    // migrate base64 images if any
+    for(const f of state.folders){
+      defaultsForFolder(f);
+      for(const q of (f.questions||[])){
+        if(q.image && !q.imageId){
+          try{
+            const blob = await dataUrlToBlob(q.image);
+            const id = await putImageBlob(blob);
+            q.imageId = id;
+            delete q.image;
+          }catch{}
+        }
+      }
+    }
+
+    await saveState().catch(()=>{});
+  }
+
+  for(const f of state.folders) defaultsForFolder(f);
+
   setTheme(state.theme);
   applyBackground(state.background);
   applyFolderGlow();
-
-  // render
-  renderHome();
 
   // wire import/export
   const btnSave = document.getElementById("btnSave");
@@ -1265,14 +1521,16 @@ function clampInt(v, min, max){
   if(importInput) importInput.onchange = (e) => {
     const file = e.target.files && e.target.files[0];
     if(file) importAny(file);
-    e.target.value = ""; // allow re-select same file
+    e.target.value = "";
   };
 
-  // hide loading after first paint
-  requestAnimationFrame(() => requestAnimationFrame(hideLoading));
-})();
+  renderHome();
+  hideLoading();
+}
 
-// Expose for inline handlers
+init();
+
+// =================== Expose for inline handlers ===================
 window.setTheme = setTheme;
 window.setBackgroundTile = setBackgroundTile;
 window.sendEmail = sendEmail;
@@ -1296,4 +1554,4 @@ window.openCrop = openCrop;
 window.openCropExisting = openCropExisting;
 
 window.exportPDF = exportPDF;
-window.exportPNG = exportPNG;
+window.exportZip = exportZip;
