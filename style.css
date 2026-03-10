@@ -153,6 +153,10 @@ body.no-folder-glow .folder-glow::after{ box-shadow:none; opacity:.9; }
 .modal-header{ display:flex; justify-content:space-between; align-items:center; padding:10px 16px; }
 .modal-body{ padding:8px 16px 16px; }
 
+.hidden{
+  display:none !important;
+}
+
 .row{ margin:10px 0; text-align:right; }
 .row-inline{
   display:flex; gap:10px; align-items:center; flex-wrap:wrap;
