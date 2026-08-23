@@ -25,6 +25,7 @@ const STORE_IMAGES = "images";
 
 let db = null;
 let memImageUrlCache = new Map();
+let pdfExportInProgress = false;
 
 function openDB(){
   return new Promise((resolve, reject) => {
@@ -74,6 +75,17 @@ function idbDel(store, key){
     const tx = db.transaction(store, "readwrite");
     const st = tx.objectStore(store);
     const req = st.delete(key);
+
+    req.onsuccess = () => resolve(true);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbClear(store){
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, "readwrite");
+    const st = tx.objectStore(store);
+    const req = st.clear();
 
     req.onsuccess = () => resolve(true);
     req.onerror = () => reject(req.error);
@@ -169,18 +181,12 @@ function defaultsForFolder(f){
     if(!("options" in q)) q.options = [];
     if(!("align" in q)) q.align = "right";
     if(!("answerText" in q)) q.answerText = "";
-
-    // حالت گزینه‌ها: vertical یا inline
     if(!("optionsLayout" in q)){
       q.optionsLayout = "vertical";
     }
-
-    // چینش تصویر: right / center / left
     if(!("imageAlign" in q)){
       q.imageAlign = "center";
     }
-
-    // چینش گزینه‌ها: right / center / left
     if(!("optionsAlign" in q)){
       q.optionsAlign = "right";
     }
@@ -241,6 +247,10 @@ function applyBackground(key){
   }else if(key === "grid"){
     document.body.style.backgroundImage = "radial-gradient(#64748b 1px,transparent 1px)";
     document.body.style.backgroundSize = "24px 24px";
+  }else if(key === "glass"){
+    document.body.style.backgroundColor = "transparent";
+  }else if(key === "plain"){
+    document.body.style.backgroundColor = "#E9EEF5";
   }else{
     document.body.style.backgroundColor = getComputedStyle(document.body).getPropertyValue("--bg");
   }
@@ -288,9 +298,10 @@ async function doFullReset(){
   await revokeAllImageUrls();
 
   try{
-    const tx = db.transaction(STORE_IMAGES, "readwrite");
-    tx.objectStore(STORE_IMAGES).clear();
-  }catch{}
+    await idbClear(STORE_IMAGES);
+  }catch(err){
+    console.error("Error clearing images:", err);
+  }
 
   state.folders = [];
   state.theme = "dark";
@@ -375,9 +386,6 @@ function sleepFrame(){
 }
 
 function getImageJustify(align){
-  // صفحه RTL است:
-  // flex-start = راست
-  // flex-end = چپ
   if(align === "right") return "flex-start";
   if(align === "left") return "flex-end";
   return "center";
@@ -474,8 +482,39 @@ function addFolder(){
   renderHome();
 }
 
-function deleteFolder(i){
+async function deleteFolder(i){
   if(!confirm("این پوشه حذف شود؟")) return;
+
+  const folder = state.folders[i];
+  
+  // جمع‌آوری و حذف تصاویر
+  const imageIds = new Set();
+  for(const q of (folder.questions || [])){
+    if(q.imageId) imageIds.add(q.imageId);
+  }
+  
+  for(const id of imageIds){
+    try{
+      // بررسی اینکه آیا این image در جای دیگری استفاده شده
+      let usedElsewhere = false;
+      for(let j = 0; j < state.folders.length; j++){
+        if(j === i) continue;
+        for(const q of (state.folders[j].questions || [])){
+          if(q.imageId === id){
+            usedElsewhere = true;
+            break;
+          }
+        }
+        if(usedElsewhere) break;
+      }
+      
+      if(!usedElsewhere){
+        await removeImage(id);
+      }
+    }catch(err){
+      console.error("Error removing image:", err);
+    }
+  }
 
   state.folders.splice(i, 1);
 
@@ -573,7 +612,6 @@ function openFolder(i){
 
   app.appendChild(header);
 
-  // دکمه‌های افزودن سؤال و خروجی‌ها در یک خط
   const controls = document.createElement("div");
   controls.className = "glass-3d card";
 
@@ -614,7 +652,13 @@ function openFolder(i){
   document.getElementById("addTextQ").onclick = () => addTextQuestion(i);
   document.getElementById("addImageQ").onclick = () => openCrop(i);
 
-  document.getElementById("exportPDF").onclick = () => exportPDF(i);
+  document.getElementById("exportPDF").onclick = () => {
+    if(pdfExportInProgress){
+      alert("در حال حاضر خروجی PDF در حال ساخت است. لطفاً صبر کنید.");
+      return;
+    }
+    exportPDF(i);
+  };
   document.getElementById("exportZIP").onclick = () => exportZip();
 
   document.getElementById("numberAlign").onchange = e => {
@@ -766,7 +810,6 @@ async function renderQuestions(folderIndex){
     card.setAttribute("dir", detectDirection(q.text || ""));
     card.setAttribute("align", q.align || "right");
 
-    // عنوان سؤال
     const top = document.createElement("div");
     top.className = "top-row";
 
@@ -781,7 +824,6 @@ async function renderQuestions(folderIndex){
 
     top.appendChild(strong);
 
-    // دکمه‌ها
     const actions = document.createElement("div");
     actions.className = "actions";
 
@@ -804,7 +846,7 @@ async function renderQuestions(folderIndex){
 
     alignBtn.onclick = (e) => {
       e.stopPropagation();
-      openLayoutMenu(folderIndex, idx, alignBtn);
+      openLayoutMenuFullscreen(folderIndex, idx);
     };
 
     const ansBtn = document.createElement("button");
@@ -839,7 +881,6 @@ async function renderQuestions(folderIndex){
     top.appendChild(actions);
     card.appendChild(top);
 
-    // تصویر پس از متن سؤال و قبل از گزینه‌ها
     if(q.imageId){
       const imageWrap = document.createElement("div");
 
@@ -858,14 +899,14 @@ async function renderQuestions(folderIndex){
       });
     }
 
-    // گزینه‌ها پس از تصویر
     if(q.options && q.options.length){
       const ul = document.createElement("ul");
       const layout = q.optionsLayout || "vertical";
 
       ul.className = `options options-${layout}`;
-
-      // اعمال چینش گزینه‌ها
+      
+      ul.setAttribute("dir", "ltr");
+      
       if(q.optionsAlign === "center") ul.style.textAlign = "center";
       if(q.optionsAlign === "left") ul.style.textAlign = "left";
       if(q.optionsAlign === "right") ul.style.textAlign = "right";
@@ -880,6 +921,8 @@ async function renderQuestions(folderIndex){
         const textSpan = document.createElement("span");
         textSpan.className = "option-text";
         textSpan.textContent = o;
+        textSpan.setAttribute("dir", "ltr");
+        textSpan.style.unicodeBidi = "plaintext";
 
         li.appendChild(labelSpan);
         li.appendChild(textSpan);
@@ -890,7 +933,6 @@ async function renderQuestions(folderIndex){
       card.appendChild(ul);
     }
 
-    // Drag and Drop
     card.addEventListener("dragstart", e => {
       e.dataTransfer.effectAllowed = "move";
       e.dataTransfer.setData("index", idx);
@@ -917,127 +959,163 @@ async function renderQuestions(folderIndex){
   }
 }
 
-// =================== Layout Menu (منوی چینش) ===================
-function openLayoutMenu(folderIndex, idx, anchorBtn){
+// =================== Layout Menu Fullscreen (منوی چینش تمام صفحه) ===================
+function openLayoutMenuFullscreen(folderIndex, idx){
   const q = state.folders[folderIndex].questions[idx];
 
-  // حذف منوی قبلی اگه باز باشه
-  document.querySelectorAll(".layout-menu").forEach(m => m.remove());
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay active";
+  overlay.style.overflow = "hidden";
 
-  const menu = document.createElement("div");
-  menu.className = "layout-menu glass-3d";
+  const panel = document.createElement("div");
+  panel.className = "modal-panel glass-3d";
+  panel.style.maxHeight = "80vh";
+  panel.style.overflowY = "auto";
 
-  // موقعیت منو نسبت به دکمه
-  const rect = anchorBtn.getBoundingClientRect();
-  menu.style.position = "fixed";
-  menu.style.top = (rect.bottom + 4) + "px";
-  menu.style.left = rect.left + "px";
-  menu.style.zIndex = "300";
-  menu.style.minWidth = "240px";
-  menu.style.padding = "12px";
-  menu.style.borderRadius = "12px";
-  menu.style.boxShadow = "0 8px 24px rgba(0,0,0,.3)";
+  panel.innerHTML = `
+    <div class="modal-header">
+      <h2>تنظیمات چینش سوال</h2>
 
-  // چینش متن سوال
-  const textAlignRow = document.createElement("div");
-  textAlignRow.className = "layout-row";
-  textAlignRow.innerHTML = `
-    <span class="layout-label">متن سوال:</span>
-    <div class="layout-options">
-      <button class="mini ${q.align === 'right' ? 'active' : ''}" data-align="right">راست</button>
-      <button class="mini ${q.align === 'center' ? 'active' : ''}" data-align="center">وسط</button>
-      <button class="mini ${q.align === 'left' ? 'active' : ''}" data-align="left">چپ</button>
+      <button class="icon-btn" id="closeLayoutMenu">
+        <span class="material-icons-outlined">close</span>
+      </button>
+    </div>
+
+    <div class="modal-body">
+      <div class="layout-section">
+        <label class="layout-section-label">چینش متن سوال:</label>
+        <div class="layout-options-group">
+          <button class="layout-option-btn ${q.align === 'right' ? 'active' : ''}" data-align="right">
+            <span class="material-icons-outlined">format_align_right</span>
+            راست
+          </button>
+          <button class="layout-option-btn ${q.align === 'center' ? 'active' : ''}" data-align="center">
+            <span class="material-icons-outlined">format_align_center</span>
+            وسط
+          </button>
+          <button class="layout-option-btn ${q.align === 'left' ? 'active' : ''}" data-align="left">
+            <span class="material-icons-outlined">format_align_left</span>
+            چپ
+          </button>
+        </div>
+      </div>
+
+      <div class="layout-section">
+        <label class="layout-section-label">چینش عکس:</label>
+        <div class="layout-options-group">
+          <button class="layout-option-btn ${q.imageAlign === 'right' ? 'active' : ''}" data-image-align="right">
+            <span class="material-icons-outlined">align_horizontal_right</span>
+            راست
+          </button>
+          <button class="layout-option-btn ${q.imageAlign === 'center' ? 'active' : ''}" data-image-align="center">
+            <span class="material-icons-outlined">align_horizontal_center</span>
+            وسط
+          </button>
+          <button class="layout-option-btn ${q.imageAlign === 'left' ? 'active' : ''}" data-image-align="left">
+            <span class="material-icons-outlined">align_horizontal_left</span>
+            چپ
+          </button>
+        </div>
+      </div>
+
+      <div class="layout-section">
+        <label class="layout-section-label">چینش گزینه‌ها:</label>
+        <div class="layout-options-group">
+          <button class="layout-option-btn ${q.optionsAlign === 'right' ? 'active' : ''}" data-options-align="right">
+            <span class="material-icons-outlined">format_align_right</span>
+            راست
+          </button>
+          <button class="layout-option-btn ${q.optionsAlign === 'center' ? 'active' : ''}" data-options-align="center">
+            <span class="material-icons-outlined">format_align_center</span>
+            وسط
+          </button>
+          <button class="layout-option-btn ${q.optionsAlign === 'left' ? 'active' : ''}" data-options-align="left">
+            <span class="material-icons-outlined">format_align_left</span>
+            چپ
+          </button>
+        </div>
+      </div>
+
+      <div class="layout-section">
+        <label class="layout-section-label">حالت نمایش گزینه‌ها:</label>
+        <div class="layout-options-group">
+          <button class="layout-option-btn ${q.optionsLayout === 'vertical' ? 'active' : ''}" data-options-layout="vertical">
+            <span class="material-icons-outlined">vertical_split</span>
+            عمودی
+          </button>
+          <button class="layout-option-btn ${q.optionsLayout === 'inline' ? 'active' : ''}" data-options-layout="inline">
+            <span class="material-icons-outlined">horizontal_split</span>
+            افقی
+          </button>
+        </div>
+      </div>
+
+      <div class="row-inline center" style="margin-top:16px;">
+        <button class="primary" id="closeLayoutDone">انجام شد</button>
+      </div>
     </div>
   `;
 
-  // چینش عکس
-  const imageAlignRow = document.createElement("div");
-  imageAlignRow.className = "layout-row";
-  imageAlignRow.innerHTML = `
-    <span class="layout-label">عکس:</span>
-    <div class="layout-options">
-      <button class="mini ${q.imageAlign === 'right' ? 'active' : ''}" data-image-align="right">راست</button>
-      <button class="mini ${q.imageAlign === 'center' ? 'active' : ''}" data-image-align="center">وسط</button>
-      <button class="mini ${q.imageAlign === 'left' ? 'active' : ''}" data-image-align="left">چپ</button>
-    </div>
-  `;
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
 
-  // چینش گزینه‌ها
-  const optionsAlignRow = document.createElement("div");
-  optionsAlignRow.className = "layout-row";
-  optionsAlignRow.innerHTML = `
-    <span class="layout-label">گزینه‌ها:</span>
-    <div class="layout-options">
-      <button class="mini ${q.optionsAlign === 'right' ? 'active' : ''}" data-options-align="right">راست</button>
-      <button class="mini ${q.optionsAlign === 'center' ? 'active' : ''}" data-options-align="center">وسط</button>
-      <button class="mini ${q.optionsAlign === 'left' ? 'active' : ''}" data-options-align="left">چپ</button>
-    </div>
-  `;
+  document.body.style.overflow = "hidden";
 
-  // حالت گزینه‌ها (عمودی/افقی)
-  const optionsLayoutRow = document.createElement("div");
-  optionsLayoutRow.className = "layout-row";
-  optionsLayoutRow.innerHTML = `
-    <span class="layout-label">حالت گزینه‌ها:</span>
-    <div class="layout-options">
-      <button class="mini ${q.optionsLayout === 'vertical' ? 'active' : ''}" data-options-layout="vertical">عمودی</button>
-      <button class="mini ${q.optionsLayout === 'inline' ? 'active' : ''}" data-options-layout="inline">افقی</button>
-    </div>
-  `;
-
-  menu.appendChild(textAlignRow);
-  menu.appendChild(imageAlignRow);
-  menu.appendChild(optionsAlignRow);
-  menu.appendChild(optionsLayoutRow);
-
-  document.body.appendChild(menu);
-
-  // رویدادها
-  menu.querySelectorAll("[data-align]").forEach(btn => {
+  panel.querySelectorAll("[data-align]").forEach(btn => {
     btn.onclick = () => {
       q.align = btn.dataset.align;
       saveStateDebounced();
       renderQuestions(folderIndex);
-      menu.remove();
+      updateActiveButtons(panel, "data-align", q.align);
     };
   });
 
-  menu.querySelectorAll("[data-image-align]").forEach(btn => {
+  panel.querySelectorAll("[data-image-align]").forEach(btn => {
     btn.onclick = () => {
       q.imageAlign = btn.dataset.imageAlign;
       saveStateDebounced();
       renderQuestions(folderIndex);
-      menu.remove();
+      updateActiveButtons(panel, "data-image-align", q.imageAlign);
     };
   });
 
-  menu.querySelectorAll("[data-options-align]").forEach(btn => {
+  panel.querySelectorAll("[data-options-align]").forEach(btn => {
     btn.onclick = () => {
       q.optionsAlign = btn.dataset.optionsAlign;
       saveStateDebounced();
       renderQuestions(folderIndex);
-      menu.remove();
+      updateActiveButtons(panel, "data-options-align", q.optionsAlign);
     };
   });
 
-  menu.querySelectorAll("[data-options-layout]").forEach(btn => {
+  panel.querySelectorAll("[data-options-layout]").forEach(btn => {
     btn.onclick = () => {
       q.optionsLayout = btn.dataset.optionsLayout;
       saveStateDebounced();
       renderQuestions(folderIndex);
-      menu.remove();
+      updateActiveButtons(panel, "data-options-layout", q.optionsLayout);
     };
   });
 
-  // بستن منو با کلیک بیرون
-  setTimeout(() => {
-    document.addEventListener("click", function closeMenu(e) {
-      if (!menu.contains(e.target) && e.target !== anchorBtn) {
-        menu.remove();
-        document.removeEventListener("click", closeMenu);
-      }
+  function updateActiveButtons(panel, attr, value){
+    panel.querySelectorAll(`[${attr}]`).forEach(b => {
+      b.classList.toggle("active", b.getAttribute(attr) === value);
     });
-  }, 0);
+  }
+
+  const close = () => {
+    document.body.style.overflow = "";
+    document.body.removeChild(overlay);
+  };
+
+  panel.querySelector("#closeLayoutMenu").onclick = close;
+  panel.querySelector("#closeLayoutDone").onclick = close;
+
+  overlay.addEventListener("click", (e) => {
+    if(e.target === overlay){
+      close();
+    }
+  });
 }
 
 // =================== Add text question ===================
@@ -1062,6 +1140,7 @@ function addTextQuestion(folderIndex){
 
   openOptionsEditor(folderIndex, state.folders[folderIndex].questions.length - 1);
 }
+
 // =================== Options editor ===================
 function openOptionsEditor(folderIndex, idx){
   const q = state.folders[folderIndex].questions[idx];
@@ -1488,14 +1567,16 @@ async function openCropExisting(folderIndex, idx, imageId){
     img.src = url;
     img.style.maxWidth = "100%";
 
-    area.appendChild(img);
+    img.onload = () => {
+      state.cropper = new Cropper(img, {
+        viewMode: 1,
+        dragMode: "move",
+        autoCropArea: .85,
+        background: false
+      });
+    };
 
-    state.cropper = new Cropper(img, {
-      viewMode: 1,
-      dragMode: "move",
-      autoCropArea: .85,
-      background: false
-    });
+    area.appendChild(img);
   }catch(err){
     console.error(err);
     alert("تصویر پیدا نشد.");
@@ -1563,22 +1644,29 @@ function cleanupCrop(overlay){
     state.pendingImageBlobUrl = null;
   }
 }
-// =================== PDF Export ===================
+
+// =================== PDF Export - Production Ready ===================
 async function exportPDF(folderIndex){
+  // جلوگیری از اجرای هم‌زمان
+  if(pdfExportInProgress){
+    alert("در حال حاضر خروجی PDF در حال ساخت است. لطفاً صبر کنید.");
+    return;
+  }
+  
+  pdfExportInProgress = true;
+  
   const folder = state.folders[folderIndex];
   defaultsForFolder(folder);
 
   const { jsPDF } = window.jspdf;
-
-  showLoading("در حال ساخت PDF…");
-  await sleepFrame();
-
   let stage = null;
+  let doc = null;
+  let pageCounter = 0;
 
   try{
     const quality = folder.exportQuality === "hq" ? "hq" : "compact";
-    const scale = quality === "hq" ? 2.3 : 1.9;
-    const jpegQ = quality === "hq" ? .90 : .82;
+    const scale = quality === "hq" ? 1.8 : 1.5;
+    const jpegQ = quality === "hq" ? 0.88 : 0.78;
 
     const PAGE_W = 794;
     const PAGE_H = 1123;
@@ -1588,11 +1676,10 @@ async function exportPDF(folderIndex){
     const manualMode = folder.perPageMode === "manual";
     const manualLimit = clampInt(folder.perPageManual || 6, 2, 50);
 
-    // تشخیص چپ‌چین بودن
     const isLeftAlign = folder.numberAlign === "left";
 
+    // ایجاد stage
     stage = document.createElement("div");
-
     stage.style.position = "fixed";
     stage.style.left = "-99999px";
     stage.style.top = "0";
@@ -1609,7 +1696,6 @@ async function exportPDF(folderIndex){
     document.body.appendChild(stage);
 
     const title = document.createElement("div");
-
     title.style.fontWeight = "900";
     title.style.fontSize = "18px";
     title.style.marginBottom = "10px";
@@ -1617,9 +1703,9 @@ async function exportPDF(folderIndex){
     title.textContent = folder.name || "Arafiles";
 
     stage.appendChild(title);
+    await sleepFrame();
 
     const footer = document.createElement("div");
-
     footer.style.position = "absolute";
     footer.style.left = "0";
     footer.style.right = "0";
@@ -1631,13 +1717,13 @@ async function exportPDF(folderIndex){
     stage.appendChild(footer);
 
     const colsWrap = document.createElement("div");
-
     colsWrap.style.display = "flex";
     colsWrap.style.gap = GAP + "px";
 
-    const availableH = PAGE_H - (PADDING * 2) - title.getBoundingClientRect().height - 20;
+    const titleHeight = title.getBoundingClientRect().height || 40;
+    const availableH = PAGE_H - (PADDING * 2) - titleHeight - 20;
 
-    colsWrap.style.height = availableH + "px";
+    colsWrap.style.height = Math.max(availableH, 300) + "px";
     colsWrap.style.overflow = "hidden";
 
     const col1 = document.createElement("div");
@@ -1652,7 +1738,9 @@ async function exportPDF(folderIndex){
       col.style.gap = "12px";
     });
 
-    // ترتیب ستون‌ها بر اساس چینش
+    const firstCol = isLeftAlign ? col2 : col1;
+    const secondCol = isLeftAlign ? col1 : col2;
+
     if(isLeftAlign){
       colsWrap.appendChild(col2);
       colsWrap.appendChild(col1);
@@ -1665,17 +1753,52 @@ async function exportPDF(folderIndex){
 
     const qs = folder.questions || [];
 
-    const waitImages = async root => {
+    if(qs.length === 0){
+      throw new Error("هیچ سوالی برای خروجی وجود ندارد");
+    }
+
+    // ابزارهای کمکی
+    const waitImages = async (root) => {
       const imgs = Array.from(root.querySelectorAll("img"));
+      if(imgs.length === 0) return;
 
-      await Promise.all(imgs.map(img => {
-        if(img.complete) return Promise.resolve();
+      const promises = imgs.map(img => {
+        return new Promise((resolve) => {
+          let resolved = false;
+          const timeout = setTimeout(() => {
+            if(!resolved){
+              resolved = true;
+              resolve();
+            }
+          }, 4000);
 
-        return new Promise(resolve => {
-          img.onload = img.onerror = () => resolve();
+          img.onload = () => {
+            if(!resolved){
+              resolved = true;
+              clearTimeout(timeout);
+              resolve();
+            }
+          };
+          
+          img.onerror = () => {
+            if(!resolved){
+              resolved = true;
+              clearTimeout(timeout);
+              resolve();
+            }
+          };
+
+          if(img.complete && img.naturalWidth > 0){
+            if(!resolved){
+              resolved = true;
+              clearTimeout(timeout);
+              resolve();
+            }
+          }
         });
-      }));
+      });
 
+      await Promise.all(promises);
       await sleepFrame();
     };
 
@@ -1688,18 +1811,15 @@ async function exportPDF(folderIndex){
       block.style.boxSizing = "border-box";
       block.style.breakInside = "avoid";
       block.style.pageBreakInside = "avoid";
+      block.style.background = "#fff";
 
       if(q.align === "center") block.style.textAlign = "center";
       if(q.align === "left") block.style.textAlign = "left";
       if(q.align === "right") block.style.textAlign = "right";
 
-      // عنوان سؤال
       const head = document.createElement("div");
-
       head.style.fontWeight = "900";
       head.style.marginBottom = "8px";
-      
-      // اگر numberAlign برابر left باشد، شماره سوال در چپ قرار می‌گیرد
       head.style.textAlign = folder.numberAlign || "right";
       
       head.textContent = q.text && q.text.trim().length
@@ -1708,33 +1828,38 @@ async function exportPDF(folderIndex){
 
       block.appendChild(head);
 
-      // تصویر پس از متن سؤال و قبل از گزینه‌ها
       if(q.imageId){
-        const imageWrap = document.createElement("div");
+        try{
+          const imageWrap = document.createElement("div");
+          imageWrap.style.display = "flex";
+          imageWrap.style.marginTop = "10px";
+          imageWrap.style.justifyContent = getImageJustify(q.imageAlign || "center");
 
-        imageWrap.style.display = "flex";
-        imageWrap.style.marginTop = "10px";
+          const img = document.createElement("img");
+          img.style.maxWidth = "100%";
+          img.style.maxHeight = "220px";
+          img.style.objectFit = "contain";
+          img.style.borderRadius = "10px";
 
-        const imageAlign = q.imageAlign || "center";
+          const url = await getImageUrl(q.imageId);
+          
+          if(url){
+            img.src = url;
+            // تلاش برای decode
+            try{
+              if(img.decode) await img.decode();
+            }catch{}
+          }else{
+            img.style.display = "none";
+          }
 
-        imageWrap.style.justifyContent = getImageJustify(imageAlign);
-
-        const img = document.createElement("img");
-
-        img.style.maxWidth = "100%";
-        img.style.maxHeight = "220px";
-        img.style.objectFit = "contain";
-        img.style.borderRadius = "10px";
-
-        const url = await getImageUrl(q.imageId);
-
-        if(url) img.src = url;
-
-        imageWrap.appendChild(img);
-        block.appendChild(imageWrap);
+          imageWrap.appendChild(img);
+          block.appendChild(imageWrap);
+        }catch(err){
+          console.warn("خطا در بارگذاری تصویر:", err);
+        }
       }
 
-      // گزینه‌ها پس از تصویر
       if(q.options && q.options.length){
         const opts = document.createElement("div");
         const layout = q.optionsLayout || "vertical";
@@ -1752,7 +1877,8 @@ async function exportPDF(folderIndex){
           opts.style.marginTop = "8px";
         }
 
-        // اعمال چینش گزینه‌ها
+        opts.setAttribute("dir", "ltr");
+
         if(q.optionsAlign === "center") opts.style.textAlign = "center";
         if(q.optionsAlign === "left") opts.style.textAlign = "left";
         if(q.optionsAlign === "right") opts.style.textAlign = "right";
@@ -1764,9 +1890,10 @@ async function exportPDF(folderIndex){
             row.style.whiteSpace = "nowrap";
           }
 
+          row.style.direction = "ltr";
           row.innerHTML =
             `<span style="direction:ltr;unicode-bidi:isolate;display:inline-block;min-width:22px;font-weight:800;">${String.fromCharCode(65 + i)}.</span>` +
-            `<span>${escapeHtml(opt)}</span>`;
+            `<span style="direction:ltr;unicode-bidi:plaintext;">${escapeHtml(opt)}</span>`;
 
           opts.appendChild(row);
         });
@@ -1782,7 +1909,13 @@ async function exportPDF(folderIndex){
       col2.innerHTML = "";
     };
 
-    const fits = col => col.scrollHeight <= col.clientHeight;
+    const fits = (col) => {
+      try{
+        return col.scrollHeight <= col.clientHeight + 5;
+      }catch{
+        return true;
+      }
+    };
 
     const layouts = [];
 
@@ -1793,18 +1926,8 @@ async function exportPDF(folderIndex){
       });
     };
 
-    // ستون شروع بر اساس چینش
-    let currentCol = isLeftAlign ? col2 : col1;
-    let countOnPage = 0;
-
-    const newPage = () => {
-      pushLayout();
-      clearCols();
-      currentCol = isLeftAlign ? col2 : col1;
-      countOnPage = 0;
-    };
-
-    // چیدمان سؤال‌ها
+    // ساخت بلوک‌ها
+    const blocks = [];
     for(let i = 0; i < qs.length; i++){
       const q = qs[i];
 
@@ -1815,113 +1938,192 @@ async function exportPDF(folderIndex){
       if(!("imageAlign" in q)) q.imageAlign = "center";
       if(!("optionsAlign" in q)) q.optionsAlign = "right";
 
+      const block = await makeBlock(q, i + 1);
+      blocks.push(block);
+      
+      if(i % 5 === 0 || i === qs.length - 1){
+        showLoading(`در حال ساخت PDF… ${Math.round((i + 1) / qs.length * 100)}%`);
+        await sleepFrame();
+      }
+    }
+
+    // چیدمان بلوک‌ها با جلوگیری از infinite loop
+    let currentCol = firstCol;
+    let countOnPage = 0;
+    let blockIndex = 0;
+    let guardCounter = 0;
+    const MAX_GUARD = blocks.length * 3 + 10;
+
+    while(blockIndex < blocks.length && guardCounter < MAX_GUARD){
+      guardCounter++;
+      
       if(manualMode && countOnPage >= manualLimit){
-        newPage();
+        pushLayout();
+        clearCols();
+        currentCol = firstCol;
+        countOnPage = 0;
+        continue;
       }
 
-      const block = await makeBlock(q, i + 1);
-
+      const block = blocks[blockIndex];
+      const blockHeight = block.scrollHeight || 200;
+      
+      // اگر بلوک از ارتفاع کل صفحه بزرگتر است، آن را مقیاس‌دهی کن
+      const pageHeight = parseInt(colsWrap.style.height) || 700;
+      if(blockHeight > pageHeight * 0.9){
+        const scaleFactor = Math.min(1, (pageHeight * 0.85) / blockHeight);
+        block.style.transform = `scale(${scaleFactor})`;
+        block.style.transformOrigin = "top center";
+      }
+      
       currentCol.appendChild(block);
       await waitImages(block);
 
       if(!fits(currentCol)){
         currentCol.removeChild(block);
-
-        if(isLeftAlign){
-          // وقتی چپ‌چین است، اول col2 پر می‌شود
-          if(currentCol === col2){
-            currentCol = col1;
-            currentCol.appendChild(block);
-            await waitImages(block);
-
-            if(!fits(currentCol)){
-              currentCol.removeChild(block);
-              newPage();
-
-              currentCol.appendChild(block);
-              await waitImages(block);
-
-              if(!fits(currentCol)){
-                block.style.fontSize = "12px";
-                block.style.lineHeight = "1.2";
-              }
-            }
-          }else{
-            newPage();
-            currentCol.appendChild(block);
-            await waitImages(block);
-
-            if(!fits(currentCol)){
-              block.style.fontSize = "12px";
-              block.style.lineHeight = "1.2";
-            }
-          }
-        }else{
-          // وقتی راست‌چین است، اول col1 پر می‌شود
-          if(currentCol === col1){
-            currentCol = col2;
-            currentCol.appendChild(block);
-            await waitImages(block);
-
-            if(!fits(currentCol)){
-              currentCol.removeChild(block);
-              newPage();
-
-              currentCol.appendChild(block);
-              await waitImages(block);
-
-              if(!fits(currentCol)){
-                block.style.fontSize = "12px";
-                block.style.lineHeight = "1.2";
-              }
-            }
-          }else{
-            newPage();
-            currentCol.appendChild(block);
-            await waitImages(block);
-
-            if(!fits(currentCol)){
-              block.style.fontSize = "12px";
-              block.style.lineHeight = "1.2";
-            }
-          }
+        
+        if(currentCol === firstCol){
+          currentCol = secondCol;
+          continue;
+        } else {
+          // هر دو ستون پر شدند - صفحه جدید
+          pushLayout();
+          clearCols();
+          currentCol = firstCol;
+          countOnPage = 0;
+          continue;
         }
       }
 
+      blockIndex++;
       countOnPage++;
+
+      if(currentCol === firstCol && !fits(firstCol)){
+        currentCol = secondCol;
+      }
+    }
+
+    // اگر guard فعال شد، یعنی احتمالاً infinite loop
+    if(guardCounter >= MAX_GUARD){
+      console.warn("Guard limit reached, forcing page break");
+      pushLayout();
     }
 
     if(col1.children.length || col2.children.length){
       pushLayout();
     }
 
-    const pages = [];
+    if(layouts.length === 0){
+      throw new Error("هیچ صفحه‌ای برای خروجی ساخته نشد");
+    }
+
+    // ایجاد jsPDF یک بار
+    doc = new jsPDF("p", "mm", "a4");
     const shouldKey = !!folder.includeKey;
     const totalPages = layouts.length + (shouldKey ? 1 : 0);
 
-    const snapPage = async pageIndex => {
+    // تابع snapshot با مدیریت حافظه
+    const snapAndAddPage = async (pageIndex, isKeyPage = false) => {
       footer.textContent = folder.pageNumbers ? String(pageIndex) : "";
 
       await sleepFrame();
 
-      const canvas = await html2canvas(stage, {
-        scale,
-        backgroundColor: "#fff",
-        useCORS: true,
-        allowTaint: false
+      if(document.fonts && document.fonts.ready){
+        try{
+          await document.fonts.ready;
+        }catch{}
+      }
+
+      // Promise با timeout واقعی
+      const canvasPromise = new Promise((resolve, reject) => {
+        let timeoutId = null;
+        
+        const cleanup = () => {
+          if(timeoutId){
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
+        };
+
+        timeoutId = setTimeout(() => {
+          cleanup();
+          reject(new Error("html2canvas timeout"));
+        }, 60000);
+
+        html2canvas(stage, {
+          scale: scale,
+          backgroundColor: "#fff",
+          useCORS: true,
+          allowTaint: false,
+          logging: false,
+          width: PAGE_W,
+          height: PAGE_H
+        }).then(canvas => {
+          cleanup();
+          resolve(canvas);
+        }).catch(err => {
+          cleanup();
+          reject(err);
+        });
       });
 
-      pages.push(canvas.toDataURL("image/jpeg", jpegQ));
+      let canvas = null;
+      try{
+        canvas = await canvasPromise;
+      }catch(err){
+        console.warn("html2canvas failed, retrying with lower quality:", err);
+        // تلاش مجدد با کیفیت پایین‌تر
+        canvas = await html2canvas(stage, {
+          scale: Math.min(scale, 1.2),
+          backgroundColor: "#fff",
+          useCORS: true,
+          allowTaint: false,
+          logging: false,
+          width: PAGE_W,
+          height: PAGE_H
+        });
+      }
+
+      if(!canvas){
+        throw new Error("Failed to create canvas");
+      }
+
+      try{
+        const imgData = canvas.toDataURL("image/jpeg", jpegQ);
+        
+        if(pageCounter > 0){
+          doc.addPage();
+        }
+        pageCounter++;
+        
+        doc.addImage(
+          imgData,
+          "JPEG",
+          0,
+          0,
+          doc.internal.pageSize.getWidth(),
+          doc.internal.pageSize.getHeight()
+        );
+      }finally{
+        // آزادسازی canvas
+        if(canvas){
+          canvas.width = 0;
+          canvas.height = 0;
+          canvas = null;
+        }
+      }
     };
 
-    // ثبت صفحات سؤال‌ها
+    // ساخت صفحات سوالات
     for(let p = 0; p < layouts.length; p++){
+      showLoading(`ساخت صفحه ${p + 1} از ${totalPages}…`);
+      await sleepFrame();
+
       title.textContent = folder.name || "Arafiles";
 
       colsWrap.style.display = "flex";
       colsWrap.innerHTML = "";
 
-      // ترتیب ستون‌ها بر اساس چینش
       if(isLeftAlign){
         colsWrap.appendChild(col2);
         colsWrap.appendChild(col1);
@@ -1933,74 +2135,107 @@ async function exportPDF(folderIndex){
       col1.innerHTML = layouts[p].col1;
       col2.innerHTML = layouts[p].col2;
 
-      await snapPage(p + 1);
+      await snapAndAddPage(p + 1);
     }
 
-    // صفحه پاسخ‌نامه
+    // Answer Key
     if(shouldKey){
+      showLoading(`ساخت صفحه پاسخ‌نامه…`);
+      await sleepFrame();
+
       title.textContent = `${folder.name || "Arafiles"} — Answer Key`;
 
       colsWrap.style.display = "block";
       colsWrap.innerHTML = "";
+      colsWrap.style.direction = "ltr";
 
       const box = document.createElement("div");
-
       box.style.height = "100%";
       box.style.border = "1px solid #ddd";
       box.style.borderRadius = "12px";
       box.style.padding = "14px";
       box.style.boxSizing = "border-box";
+      box.style.background = "#fff";
+      box.style.direction = "ltr";
 
-      const grid = document.createElement("div");
-
-      grid.style.display = "grid";
-      grid.style.gridTemplateColumns = "1fr 1fr";
-      grid.style.gap = "8px 18px";
-      grid.style.fontSize = "14px";
-      grid.style.lineHeight = "1.4";
-
-      for(let i = 0; i < qs.length; i++){
+      const half = Math.ceil(qs.length / 2);
+      
+      const colFirst = document.createElement("div");
+      colFirst.style.display = "flex";
+      colFirst.style.flexDirection = "column";
+      colFirst.style.gap = "4px";
+      colFirst.style.direction = "ltr";
+      
+      for(let i = 0; i < half && i < qs.length; i++){
         const ans = qs[i].answerText && qs[i].answerText.trim()
           ? qs[i].answerText.trim()
           : "-";
-
         const item = document.createElement("div");
-
         item.textContent = `${i + 1}) ${ans}`;
-
-        grid.appendChild(item);
+        item.style.direction = "ltr";
+        item.style.textAlign = "left";
+        colFirst.appendChild(item);
       }
-
-      box.appendChild(grid);
+      
+      const colSecond = document.createElement("div");
+      colSecond.style.display = "flex";
+      colSecond.style.flexDirection = "column";
+      colSecond.style.gap = "4px";
+      colSecond.style.direction = "ltr";
+      
+      for(let i = half; i < qs.length; i++){
+        const ans = qs[i].answerText && qs[i].answerText.trim()
+          ? qs[i].answerText.trim()
+          : "-";
+        const item = document.createElement("div");
+        item.textContent = `${i + 1}) ${ans}`;
+        item.style.direction = "ltr";
+        item.style.textAlign = "left";
+        colSecond.appendChild(item);
+      }
+      
+      const gridContainer = document.createElement("div");
+      gridContainer.style.display = "grid";
+      gridContainer.style.gridTemplateColumns = "1fr 1fr";
+      gridContainer.style.gap = "8px 18px";
+      gridContainer.style.direction = "ltr";
+      
+      gridContainer.appendChild(colFirst);
+      gridContainer.appendChild(colSecond);
+      
+      box.appendChild(gridContainer);
       colsWrap.appendChild(box);
 
-      await snapPage(totalPages);
+      await snapAndAddPage(totalPages, true);
     }
 
-    const doc = new jsPDF("p", "mm", "a4");
-
-    pages.forEach((img, idx) => {
-      if(idx > 0) doc.addPage();
-
-      doc.addImage(
-        img,
-        "JPEG",
-        0,
-        0,
-        doc.internal.pageSize.getWidth(),
-        doc.internal.pageSize.getHeight()
-      );
-    });
+    showLoading("ذخیره فایل PDF…");
+    await sleepFrame();
 
     doc.save(`${folder.name}.pdf`);
+    hideLoading();
+    
   }catch(err){
-    console.error(err);
-    alert("خطا در ساخت PDF");
+    console.error("خطا در ساخت PDF:", err);
+    hideLoading();
+    alert("خطا در ساخت PDF: " + (err.message || "خطای ناشناخته"));
   }finally{
+    // پاکسازی stage
     if(stage && stage.parentNode){
-      stage.parentNode.removeChild(stage);
+      try{
+        stage.parentNode.removeChild(stage);
+      }catch{}
     }
 
+    // آزادسازی doc
+    if(doc){
+      doc = null;
+    }
+
+    // آزاد کردن guard
+    pdfExportInProgress = false;
+    
+    // اطمینان از مخفی شدن لودر
     hideLoading();
   }
 }
@@ -2031,9 +2266,6 @@ async function exportZip(){
   try{
     await saveState().catch(() => {});
 
-    // ساخت ZIP:
-    // - data.json (پوشه‌ها و سؤال‌ها با imageId)
-    // - images/<imageId>.(png/jpg) بلاب
     const zip = new JSZip();
 
     const json = makeBackupJson();
@@ -2041,14 +2273,12 @@ async function exportZip(){
 
     const imgFolder = zip.folder("images");
 
-    // جمع‌آوری imageIdهای یکتا
     const ids = new Set();
 
     for(const f of state.folders){
       for(const q of (f.questions || [])){
         if(q.imageId) ids.add(q.imageId);
 
-        // مهاجرت داده‌های قدیمی (dataURL)
         if(q.image && !q.imageId){
           try{
             const blob = await dataUrlToBlob(q.image);
@@ -2058,20 +2288,32 @@ async function exportZip(){
             delete q.image;
 
             ids.add(newId);
-          }catch{}
+          }catch(err){
+            console.error("Error converting legacy image:", err);
+          }
         }
       }
     }
 
-    // ذخیره وضعیت اگر تصویری مهاجرت شد
     await saveState().catch(() => {});
 
+    let imageCount = 0;
     for(const id of ids){
-      const blob = await idbGet(STORE_IMAGES, id);
+      try{
+        const blob = await idbGet(STORE_IMAGES, id);
 
-      if(blob){
-        const ext = blob.type === "image/jpeg" ? "jpg" : "png";
-        imgFolder.file(`${id}.${ext}`, blob);
+        if(blob){
+          const ext = blob.type === "image/jpeg" ? "jpg" : "png";
+          imgFolder.file(`${id}.${ext}`, blob);
+          imageCount++;
+          
+          if(imageCount % 5 === 0){
+            showLoading(`در حال ساخت ZIP… ${imageCount} تصویر`);
+            await sleepFrame();
+          }
+        }
+      }catch(err){
+        console.error("Error adding image to ZIP:", err);
       }
     }
 
@@ -2082,7 +2324,6 @@ async function exportZip(){
     });
 
     const a = document.createElement("a");
-
     a.href = URL.createObjectURL(blob);
     a.download = "arafiles-backup.zip";
 
@@ -2112,7 +2353,6 @@ async function importAny(file){
       const ab = await file.arrayBuffer();
       const zip = await JSZip.loadAsync(ab);
 
-      // پیدا کردن data.json
       const dataFile =
         zip.file("data.json") ||
         zip.file("arafiles-data.json") ||
@@ -2124,34 +2364,36 @@ async function importAny(file){
       const payload = JSON.parse((jsonText || "").replace(/^\uFEFF/, "").trim());
       const data = payload?.data ? payload.data : payload;
 
-      // پیدا کردن تصاویر
       const imagesEntries = Object.keys(zip.files).filter(
         k => k.startsWith("images/") && !zip.files[k].dir
       );
 
-      // پاک کردن تصاویر قبلی
+      // پاک کردن تصاویر قبلی با transaction کامل
       await revokeAllImageUrls();
 
       try{
-        const tx = db.transaction(STORE_IMAGES, "readwrite");
-        tx.objectStore(STORE_IMAGES).clear();
-      }catch{}
-
-      // نوشتن تصاویر جدید در IDB
-      for(const path of imagesEntries){
-        const fileObj = zip.file(path);
-        if(!fileObj) continue;
-
-        const blob = await fileObj.async("blob");
-
-        // نام فایل: images/<id>.<ext>
-        const base = path.split("/").pop();
-        const id = base.split(".")[0];
-
-        await idbSet(STORE_IMAGES, id, blob);
+        await idbClear(STORE_IMAGES);
+      }catch(err){
+        console.error("Error clearing images:", err);
       }
 
-      // تنظیم state
+      // ذخیره تصاویر جدید
+      for(const path of imagesEntries){
+        try{
+          const fileObj = zip.file(path);
+          if(!fileObj) continue;
+
+          const blob = await fileObj.async("blob");
+
+          const base = path.split("/").pop();
+          const id = base.split(".")[0];
+
+          await idbSet(STORE_IMAGES, id, blob);
+        }catch(err){
+          console.error("Error importing image:", err);
+        }
+      }
+
       state.theme = data.theme || state.theme;
       state.background = data.background || state.background;
       state.folderGlow = (typeof data.folderGlow === "boolean")
@@ -2160,7 +2402,6 @@ async function importAny(file){
 
       state.folders = Array.isArray(data.folders) ? data.folders : [];
 
-      // نرمال‌سازی
       for(const f of state.folders) defaultsForFolder(f);
 
       setTheme(state.theme);
@@ -2176,7 +2417,7 @@ async function importAny(file){
       return;
     }
 
-    // JSON import (legacy)
+    // JSON import
     const text = await file.text();
     const payload = JSON.parse((text || "").replace(/^\uFEFF/, "").trim());
     const data = payload?.data ? payload.data : payload;
@@ -2189,7 +2430,6 @@ async function importAny(file){
 
     state.folders = Array.isArray(data.folders) ? data.folders : [];
 
-    // مهاجرت تصاویر base64 به IDB
     await revokeAllImageUrls();
 
     for(const f of state.folders){
@@ -2203,7 +2443,9 @@ async function importAny(file){
 
             q.imageId = id;
             delete q.image;
-          }catch{}
+          }catch(err){
+            console.error("Error converting legacy image:", err);
+          }
         }
       }
     }
@@ -2233,7 +2475,6 @@ async function init(){
   }catch(err){
     console.error("IndexedDB failed:", err);
 
-    // Fallback: بارگذاری با localStorage
     state.folders = readLegacyFolders();
     state.theme = localStorage.getItem("theme") || "dark";
     state.background = localStorage.getItem("background") || "gradient1";
@@ -2248,7 +2489,6 @@ async function init(){
     return;
   }
 
-  // بارگذاری از IDB
   const saved = await idbGet(STORE_META, "state");
 
   if(saved){
@@ -2260,7 +2500,6 @@ async function init(){
 
     state.folders = Array.isArray(saved.folders) ? saved.folders : [];
   }else{
-    // مهاجرت از localStorage
     const legacyFolders = readLegacyFolders();
 
     state.folders = legacyFolders;
@@ -2268,7 +2507,6 @@ async function init(){
     state.background = localStorage.getItem("background") || "gradient1";
     state.folderGlow = (localStorage.getItem("folderGlow") ?? "1") === "1";
 
-    // مهاجرت تصاویر base64
     for(const f of state.folders){
       defaultsForFolder(f);
 
@@ -2280,7 +2518,9 @@ async function init(){
 
             q.imageId = id;
             delete q.image;
-          }catch{}
+          }catch(err){
+            console.error("Error converting legacy image:", err);
+          }
         }
       }
     }
@@ -2294,7 +2534,6 @@ async function init(){
   applyBackground(state.background);
   applyFolderGlow();
 
-  // اتصال دکمه‌های ذخیره و بارگذاری
   const btnSave = document.getElementById("btnSave");
   const importInput = document.getElementById("importFile");
 
