@@ -179,6 +179,11 @@ function defaultsForFolder(f){
     if(!("imageAlign" in q)){
       q.imageAlign = "center";
     }
+
+    // چینش گزینه‌ها: right / center / left
+    if(!("optionsAlign" in q)){
+      q.optionsAlign = "right";
+    }
   }
 }
 
@@ -752,6 +757,7 @@ async function renderQuestions(folderIndex){
     if(!("answerText" in q)) q.answerText = "";
     if(!("optionsLayout" in q)) q.optionsLayout = "vertical";
     if(!("imageAlign" in q)) q.imageAlign = "center";
+    if(!("optionsAlign" in q)) q.optionsAlign = "right";
 
     const card = document.createElement("div");
 
@@ -793,18 +799,12 @@ async function renderQuestions(folderIndex){
 
     const alignBtn = document.createElement("button");
     alignBtn.className = "mini";
-    alignBtn.title = "چینش متن سؤال";
+    alignBtn.title = "تنظیمات چینش";
     alignBtn.innerHTML = `<span class="material-icons-outlined">format_align_center</span>`;
 
-    alignBtn.onclick = () => {
-      q.align = q.align === "center"
-        ? "right"
-        : q.align === "right"
-          ? "left"
-          : "center";
-
-      saveStateDebounced();
-      renderQuestions(folderIndex);
+    alignBtn.onclick = (e) => {
+      e.stopPropagation();
+      openLayoutMenu(folderIndex, idx, alignBtn);
     };
 
     const ansBtn = document.createElement("button");
@@ -865,6 +865,11 @@ async function renderQuestions(folderIndex){
 
       ul.className = `options options-${layout}`;
 
+      // اعمال چینش گزینه‌ها
+      if(q.optionsAlign === "center") ul.style.textAlign = "center";
+      if(q.optionsAlign === "left") ul.style.textAlign = "left";
+      if(q.optionsAlign === "right") ul.style.textAlign = "right";
+
       q.options.forEach((o, j) => {
         const li = document.createElement("li");
 
@@ -912,6 +917,129 @@ async function renderQuestions(folderIndex){
   }
 }
 
+// =================== Layout Menu (منوی چینش) ===================
+function openLayoutMenu(folderIndex, idx, anchorBtn){
+  const q = state.folders[folderIndex].questions[idx];
+
+  // حذف منوی قبلی اگه باز باشه
+  document.querySelectorAll(".layout-menu").forEach(m => m.remove());
+
+  const menu = document.createElement("div");
+  menu.className = "layout-menu glass-3d";
+
+  // موقعیت منو نسبت به دکمه
+  const rect = anchorBtn.getBoundingClientRect();
+  menu.style.position = "fixed";
+  menu.style.top = (rect.bottom + 4) + "px";
+  menu.style.left = rect.left + "px";
+  menu.style.zIndex = "300";
+  menu.style.minWidth = "240px";
+  menu.style.padding = "12px";
+  menu.style.borderRadius = "12px";
+  menu.style.boxShadow = "0 8px 24px rgba(0,0,0,.3)";
+
+  // چینش متن سوال
+  const textAlignRow = document.createElement("div");
+  textAlignRow.className = "layout-row";
+  textAlignRow.innerHTML = `
+    <span class="layout-label">متن سوال:</span>
+    <div class="layout-options">
+      <button class="mini ${q.align === 'right' ? 'active' : ''}" data-align="right">راست</button>
+      <button class="mini ${q.align === 'center' ? 'active' : ''}" data-align="center">وسط</button>
+      <button class="mini ${q.align === 'left' ? 'active' : ''}" data-align="left">چپ</button>
+    </div>
+  `;
+
+  // چینش عکس
+  const imageAlignRow = document.createElement("div");
+  imageAlignRow.className = "layout-row";
+  imageAlignRow.innerHTML = `
+    <span class="layout-label">عکس:</span>
+    <div class="layout-options">
+      <button class="mini ${q.imageAlign === 'right' ? 'active' : ''}" data-image-align="right">راست</button>
+      <button class="mini ${q.imageAlign === 'center' ? 'active' : ''}" data-image-align="center">وسط</button>
+      <button class="mini ${q.imageAlign === 'left' ? 'active' : ''}" data-image-align="left">چپ</button>
+    </div>
+  `;
+
+  // چینش گزینه‌ها
+  const optionsAlignRow = document.createElement("div");
+  optionsAlignRow.className = "layout-row";
+  optionsAlignRow.innerHTML = `
+    <span class="layout-label">گزینه‌ها:</span>
+    <div class="layout-options">
+      <button class="mini ${q.optionsAlign === 'right' ? 'active' : ''}" data-options-align="right">راست</button>
+      <button class="mini ${q.optionsAlign === 'center' ? 'active' : ''}" data-options-align="center">وسط</button>
+      <button class="mini ${q.optionsAlign === 'left' ? 'active' : ''}" data-options-align="left">چپ</button>
+    </div>
+  `;
+
+  // حالت گزینه‌ها (عمودی/افقی)
+  const optionsLayoutRow = document.createElement("div");
+  optionsLayoutRow.className = "layout-row";
+  optionsLayoutRow.innerHTML = `
+    <span class="layout-label">حالت گزینه‌ها:</span>
+    <div class="layout-options">
+      <button class="mini ${q.optionsLayout === 'vertical' ? 'active' : ''}" data-options-layout="vertical">عمودی</button>
+      <button class="mini ${q.optionsLayout === 'inline' ? 'active' : ''}" data-options-layout="inline">افقی</button>
+    </div>
+  `;
+
+  menu.appendChild(textAlignRow);
+  menu.appendChild(imageAlignRow);
+  menu.appendChild(optionsAlignRow);
+  menu.appendChild(optionsLayoutRow);
+
+  document.body.appendChild(menu);
+
+  // رویدادها
+  menu.querySelectorAll("[data-align]").forEach(btn => {
+    btn.onclick = () => {
+      q.align = btn.dataset.align;
+      saveStateDebounced();
+      renderQuestions(folderIndex);
+      menu.remove();
+    };
+  });
+
+  menu.querySelectorAll("[data-image-align]").forEach(btn => {
+    btn.onclick = () => {
+      q.imageAlign = btn.dataset.imageAlign;
+      saveStateDebounced();
+      renderQuestions(folderIndex);
+      menu.remove();
+    };
+  });
+
+  menu.querySelectorAll("[data-options-align]").forEach(btn => {
+    btn.onclick = () => {
+      q.optionsAlign = btn.dataset.optionsAlign;
+      saveStateDebounced();
+      renderQuestions(folderIndex);
+      menu.remove();
+    };
+  });
+
+  menu.querySelectorAll("[data-options-layout]").forEach(btn => {
+    btn.onclick = () => {
+      q.optionsLayout = btn.dataset.optionsLayout;
+      saveStateDebounced();
+      renderQuestions(folderIndex);
+      menu.remove();
+    };
+  });
+
+  // بستن منو با کلیک بیرون
+  setTimeout(() => {
+    document.addEventListener("click", function closeMenu(e) {
+      if (!menu.contains(e.target) && e.target !== anchorBtn) {
+        menu.remove();
+        document.removeEventListener("click", closeMenu);
+      }
+    });
+  }, 0);
+}
+
 // =================== Add text question ===================
 function addTextQuestion(folderIndex){
   const text = prompt("متن سوال (می‌تواند خالی باشد):") || "";
@@ -923,7 +1051,8 @@ function addTextQuestion(folderIndex){
     answerText: "",
     align: "right",
     optionsLayout: "vertical",
-    imageAlign: "center"
+    imageAlign: "center",
+    optionsAlign: "right"
   };
 
   state.folders[folderIndex].questions.push(q);
@@ -933,7 +1062,6 @@ function addTextQuestion(folderIndex){
 
   openOptionsEditor(folderIndex, state.folders[folderIndex].questions.length - 1);
 }
-
 // =================== Options editor ===================
 function openOptionsEditor(folderIndex, idx){
   const q = state.folders[folderIndex].questions[idx];
@@ -1056,16 +1184,6 @@ function editQuestion(folderIndex, idx){
   const panel = document.createElement("div");
   panel.className = "modal-panel glass-3d";
 
-  const optionLayoutText = q.optionsLayout === "inline"
-    ? "کنار هم"
-    : "زیر هم";
-
-  const imageIcon = q.imageAlign === "right"
-    ? "format_align_right"
-    : q.imageAlign === "left"
-      ? "format_align_left"
-      : "format_align_center";
-
   panel.innerHTML = `
     <div class="modal-header">
       <h2>ویرایش سوال</h2>
@@ -1087,11 +1205,6 @@ function editQuestion(folderIndex, idx){
           گزینه‌ها
         </button>
 
-        <button class="secondary" id="toggleOptionsLayout">
-          <span class="material-icons-outlined">view_week</span>
-          گزینه‌ها: ${optionLayoutText}
-        </button>
-
         <button class="secondary" id="editImage">
           <span class="material-icons-outlined">image</span>
           تصویر
@@ -1100,11 +1213,6 @@ function editQuestion(folderIndex, idx){
         <button class="secondary" id="cropImage">
           <span class="material-icons-outlined">crop</span>
           کراپ تصویر
-        </button>
-
-        <button class="secondary" id="cycleImageAlign">
-          <span class="material-icons-outlined">${imageIcon}</span>
-          تصویر: ${imageAlignLabel(q.imageAlign)}
         </button>
       </div>
     </div>
@@ -1126,17 +1234,6 @@ function editQuestion(folderIndex, idx){
 
   panel.querySelector("#editOptions").onclick = () => {
     openOptionsEditor(folderIndex, idx);
-  };
-
-  panel.querySelector("#toggleOptionsLayout").onclick = () => {
-    q.optionsLayout = q.optionsLayout === "inline"
-      ? "vertical"
-      : "inline";
-
-    saveStateDebounced();
-    renderQuestions(folderIndex);
-
-    document.body.removeChild(overlay);
   };
 
   panel.querySelector("#editImage").onclick = () => {
@@ -1187,19 +1284,6 @@ function editQuestion(folderIndex, idx){
     openCropExisting(folderIndex, idx, q.imageId);
   };
 
-  panel.querySelector("#cycleImageAlign").onclick = () => {
-    q.imageAlign = q.imageAlign === "right"
-      ? "center"
-      : q.imageAlign === "center"
-        ? "left"
-        : "right";
-
-    saveStateDebounced();
-    renderQuestions(folderIndex);
-
-    document.body.removeChild(overlay);
-  };
-
   panel.querySelector("#closeEditQ").onclick = () => {
     document.body.removeChild(overlay);
   };
@@ -1218,6 +1302,7 @@ async function deleteQuestion(folderIndex, idx){
   saveStateDebounced();
   renderQuestions(folderIndex);
 }
+
 // =================== Cropper / New image ===================
 function openCrop(folderIndex){
   const overlay = document.createElement("div");
@@ -1326,7 +1411,8 @@ function openCrop(folderIndex){
         align: "right",
         imageId,
         optionsLayout: "vertical",
-        imageAlign: "center"
+        imageAlign: "center",
+        optionsAlign: "right"
       });
 
       saveStateDebounced();
@@ -1477,7 +1563,6 @@ function cleanupCrop(overlay){
     state.pendingImageBlobUrl = null;
   }
 }
-
 // =================== PDF Export ===================
 async function exportPDF(folderIndex){
   const folder = state.folders[folderIndex];
@@ -1503,6 +1588,9 @@ async function exportPDF(folderIndex){
     const manualMode = folder.perPageMode === "manual";
     const manualLimit = clampInt(folder.perPageManual || 6, 2, 50);
 
+    // تشخیص چپ‌چین بودن
+    const isLeftAlign = folder.numberAlign === "left";
+
     stage = document.createElement("div");
 
     stage.style.position = "fixed";
@@ -1515,7 +1603,7 @@ async function exportPDF(folderIndex){
     stage.style.background = "#fff";
     stage.style.color = "#000";
     stage.style.fontFamily = "Vazirmatn, sans-serif";
-    stage.style.direction = "rtl";
+    stage.style.direction = isLeftAlign ? "ltr" : "rtl";
     stage.style.overflow = "hidden";
 
     document.body.appendChild(stage);
@@ -1564,8 +1652,15 @@ async function exportPDF(folderIndex){
       col.style.gap = "12px";
     });
 
-    colsWrap.appendChild(col1);
-    colsWrap.appendChild(col2);
+    // ترتیب ستون‌ها بر اساس چینش
+    if(isLeftAlign){
+      colsWrap.appendChild(col2);
+      colsWrap.appendChild(col1);
+    }else{
+      colsWrap.appendChild(col1);
+      colsWrap.appendChild(col2);
+    }
+
     stage.appendChild(colsWrap);
 
     const qs = folder.questions || [];
@@ -1603,7 +1698,10 @@ async function exportPDF(folderIndex){
 
       head.style.fontWeight = "900";
       head.style.marginBottom = "8px";
+      
+      // اگر numberAlign برابر left باشد، شماره سوال در چپ قرار می‌گیرد
       head.style.textAlign = folder.numberAlign || "right";
+      
       head.textContent = q.text && q.text.trim().length
         ? `${number}. ${q.text}`
         : `${number}.`;
@@ -1654,6 +1752,11 @@ async function exportPDF(folderIndex){
           opts.style.marginTop = "8px";
         }
 
+        // اعمال چینش گزینه‌ها
+        if(q.optionsAlign === "center") opts.style.textAlign = "center";
+        if(q.optionsAlign === "left") opts.style.textAlign = "left";
+        if(q.optionsAlign === "right") opts.style.textAlign = "right";
+
         q.options.forEach((opt, i) => {
           const row = document.createElement("div");
 
@@ -1690,13 +1793,14 @@ async function exportPDF(folderIndex){
       });
     };
 
-    let currentCol = col1;
+    // ستون شروع بر اساس چینش
+    let currentCol = isLeftAlign ? col2 : col1;
     let countOnPage = 0;
 
     const newPage = () => {
       pushLayout();
       clearCols();
-      currentCol = col1;
+      currentCol = isLeftAlign ? col2 : col1;
       countOnPage = 0;
     };
 
@@ -1709,6 +1813,7 @@ async function exportPDF(folderIndex){
       if(!("align" in q)) q.align = "right";
       if(!("optionsLayout" in q)) q.optionsLayout = "vertical";
       if(!("imageAlign" in q)) q.imageAlign = "center";
+      if(!("optionsAlign" in q)) q.optionsAlign = "right";
 
       if(manualMode && countOnPage >= manualLimit){
         newPage();
@@ -1722,15 +1827,27 @@ async function exportPDF(folderIndex){
       if(!fits(currentCol)){
         currentCol.removeChild(block);
 
-        if(currentCol === col1){
-          currentCol = col2;
-          currentCol.appendChild(block);
-          await waitImages(block);
+        if(isLeftAlign){
+          // وقتی چپ‌چین است، اول col2 پر می‌شود
+          if(currentCol === col2){
+            currentCol = col1;
+            currentCol.appendChild(block);
+            await waitImages(block);
 
-          if(!fits(currentCol)){
-            currentCol.removeChild(block);
+            if(!fits(currentCol)){
+              currentCol.removeChild(block);
+              newPage();
+
+              currentCol.appendChild(block);
+              await waitImages(block);
+
+              if(!fits(currentCol)){
+                block.style.fontSize = "12px";
+                block.style.lineHeight = "1.2";
+              }
+            }
+          }else{
             newPage();
-
             currentCol.appendChild(block);
             await waitImages(block);
 
@@ -1740,13 +1857,33 @@ async function exportPDF(folderIndex){
             }
           }
         }else{
-          newPage();
-          currentCol.appendChild(block);
-          await waitImages(block);
+          // وقتی راست‌چین است، اول col1 پر می‌شود
+          if(currentCol === col1){
+            currentCol = col2;
+            currentCol.appendChild(block);
+            await waitImages(block);
 
-          if(!fits(currentCol)){
-            block.style.fontSize = "12px";
-            block.style.lineHeight = "1.2";
+            if(!fits(currentCol)){
+              currentCol.removeChild(block);
+              newPage();
+
+              currentCol.appendChild(block);
+              await waitImages(block);
+
+              if(!fits(currentCol)){
+                block.style.fontSize = "12px";
+                block.style.lineHeight = "1.2";
+              }
+            }
+          }else{
+            newPage();
+            currentCol.appendChild(block);
+            await waitImages(block);
+
+            if(!fits(currentCol)){
+              block.style.fontSize = "12px";
+              block.style.lineHeight = "1.2";
+            }
           }
         }
       }
@@ -1784,8 +1921,14 @@ async function exportPDF(folderIndex){
       colsWrap.style.display = "flex";
       colsWrap.innerHTML = "";
 
-      colsWrap.appendChild(col1);
-      colsWrap.appendChild(col2);
+      // ترتیب ستون‌ها بر اساس چینش
+      if(isLeftAlign){
+        colsWrap.appendChild(col2);
+        colsWrap.appendChild(col1);
+      }else{
+        colsWrap.appendChild(col1);
+        colsWrap.appendChild(col2);
+      }
 
       col1.innerHTML = layouts[p].col1;
       col2.innerHTML = layouts[p].col2;
@@ -1861,6 +2004,7 @@ async function exportPDF(folderIndex){
     hideLoading();
   }
 }
+
 // =================== ZIP Export/Import ===================
 function makeBackupJson(){
   return {
