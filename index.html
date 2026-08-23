@@ -3,7 +3,6 @@
 <head>
   <meta charset="utf-8" />
 
-  <!-- Prevent zoom -->
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -17,23 +16,20 @@
 
   <link rel="stylesheet" href="style.css" />
 
-  <!-- Fonts + Icons -->
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
-  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700&display=swap" rel="stylesheet">
 
-  <!-- libs -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.js"></script>
 
-  <!-- ZIP -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
 
 <body class="dark">
-  <!-- Loading Overlay -->
+
   <div id="loadingOverlay" class="loading-overlay active" aria-hidden="false">
     <div class="loading-card glass-3d">
       <div class="spinner"></div>
@@ -42,7 +38,6 @@
     </div>
   </div>
 
-  <!-- Header -->
   <header class="app-header glass-3d">
     <h1 class="logo">Arafiles</h1>
 
@@ -55,25 +50,20 @@
         <span class="material-icons-outlined">settings</span>
       </button>
 
-      <!-- Export ZIP -->
-      <button class="icon-btn" id="btnSave" title="Backup ZIP">
+      <button class="icon-btn" id="btnSave" title="پشتیبان‌گیری ZIP">
         <span class="material-icons-outlined">save</span>
       </button>
 
-      <!-- Import ZIP/JSON -->
-      <input type="file" id="importFile" accept=".zip,.json,application/zip,application/json" hidden />
+      <input type="file" id="importFile" accept=".zip,.json,application/zip,application/json" hidden>
     </div>
   </header>
 
-  <!-- Main -->
   <main id="app" class="container"></main>
 
-  <!-- Floating add folder -->
   <button id="floatingAdd" class="floating-btn" title="افزودن پوشه">
     <span class="material-icons-outlined">add</span>
   </button>
 
-  <!-- Settings Modal -->
   <div id="settingsOverlay" class="modal-overlay">
     <div class="modal-panel glass-3d">
       <div class="modal-header">
@@ -110,18 +100,19 @@
         <div class="row">
           <label>پس‌زمینه</label>
           <div class="preview-row center">
-            <div class="preview-tile" data-bg="gradient1" style="background: linear-gradient(120deg,#1f2937,#3b82f6);" onclick="setBackgroundTile(this)"></div>
-            <div class="preview-tile" data-bg="gradient2" style="background: linear-gradient(120deg,#0ea5e9,#10b981);" onclick="setBackgroundTile(this)"></div>
-            <div class="preview-tile" data-bg="glass" style="background: rgba(255,255,255,0.5); backdrop-filter: blur(8px);" onclick="setBackgroundTile(this)"></div>
-            <div class="preview-tile" data-bg="grid" style="background-image: radial-gradient(#64748b 1px, transparent 1px); background-size: 24px 24px;" onclick="setBackgroundTile(this)"></div>
+            <div class="preview-tile" data-bg="gradient1" style="background:linear-gradient(120deg,#1f2937,#3b82f6);" onclick="setBackgroundTile(this)"></div>
+            <div class="preview-tile" data-bg="gradient2" style="background:linear-gradient(120deg,#0ea5e9,#10b981);" onclick="setBackgroundTile(this)"></div>
+            <div class="preview-tile" data-bg="glass" style="background:rgba(255,255,255,.5);backdrop-filter:blur(8px);" onclick="setBackgroundTile(this)"></div>
+            <div class="preview-tile" data-bg="grid" style="background-image:radial-gradient(#64748b 1px,transparent 1px);background-size:24px 24px;" onclick="setBackgroundTile(this)"></div>
             <div class="preview-tile" data-bg="plain" style="background:#E9EEF5;" onclick="setBackgroundTile(this)"></div>
           </div>
         </div>
 
-        <hr/>
+        <hr>
 
         <button class="primary" onclick="document.getElementById('importFile').click()">
-          <span class="material-icons-outlined">upload</span> بارگذاری (ZIP/JSON)
+          <span class="material-icons-outlined">upload</span>
+          بارگذاری (ZIP/JSON)
         </button>
 
         <div class="row" style="margin-top:12px;">
@@ -133,7 +124,7 @@
           </div>
         </div>
 
-        <hr/>
+        <hr>
 
         <div class="row">
           <label>ریست کامل اپلیکیشن</label>
@@ -147,7 +138,6 @@
     </div>
   </div>
 
-  <!-- Reset confirm -->
   <div id="resetOverlay" class="modal-overlay">
     <div class="modal-panel glass-3d">
       <div class="modal-header">
@@ -156,8 +146,9 @@
           <span class="material-icons-outlined">close</span>
         </button>
       </div>
+
       <div class="modal-body">
-        <div id="resetStep1" >
+        <div id="resetStep1">
           <p>مطمئنی می‌خوای پاک بشه؟</p>
           <div class="row-inline center">
             <button class="secondary" onclick="closeReset()">دستم خورد</button>
